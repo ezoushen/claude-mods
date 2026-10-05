@@ -83,18 +83,6 @@ function hash(s) {
   return (h >>> 0).toString(36);
 }
 
-// The engine refuses an Image whose png payload is not standard padded base64
-// (length % 4 === 0). Normalise whatever the byte reader returned: strip
-// whitespace/data-URI heads and padding, then re-pad. Returns null when the
-// payload is corrupt beyond repair, so the caller can fall back.
-function toPaddedBase64(raw) {
-  let s = String(raw ?? "").replace(/^data:[^,]*,/, "").replace(/\s+/g, "");
-  s = s.replace(/=+$/, "");
-  if (!s || /[^A-Za-z0-9+/]/.test(s)) return null;
-  const rem = s.length % 4;
-  if (rem === 1) return null;
-  return rem === 0 ? s : s + "=".repeat(4 - rem);
-}
 
 // Decode `absPath` (via a sips->PNG conversion for non-PNG input). Returns
 // { source, w, h } or null. Memoised by path + size + mtime.
@@ -105,8 +93,9 @@ async function decode($, absPath) {
   let result = null;
   try {
     // sips reformats any raster to PNG and shrinks to fit 800px, keeping the
-    // decoded bytes small and decodable by every surface. A missing or
-    // non-image file makes sips fail, so we never render a broken box.
+    // file small and decodable by every surface. A missing or non-image file
+    // makes sips fail, so we never render a broken box. The terminal reads the
+    // PNG by name — the same way the mermaid pane hands it diagram PNGs.
     const png = `${TMP_DIR}/${hash(key)}.png`;
     const sh =
       `mkdir -p ${quote(TMP_DIR)} && sips ${quote(absPath)} -z 800 800 --out ${quote(png)} 2>/dev/null && ` +
@@ -117,19 +106,7 @@ async function decode($, absPath) {
     const h = /pixelHeight:\s*(\d+)/.exec(stdout);
     // sips wrote pixels -> the file is a decodable image; size it ourselves.
     if ((r?.exitCode ?? 1) === 0 && w && h) {
-      const columns = parseInt(w[1], 10);
-      const rows = parseInt(h[1], 10);
-      // Bytes the plugin holds work on every surface; fall back to a file the
-      // terminal reads by name (mermaid-pane style) if the read is blocked.
-      let source;
-      try {
-        const bytes = await $.fs.read(png, { as: "bytes" });
-        const b64 = toPaddedBase64(bytes?.base64);
-        source = b64 ? { png: b64 } : { file: png, format: "png" };
-      } catch {
-        source = { file: png, format: "png" };
-      }
-      result = { source, w: columns, h: rows };
+      result = { file: png, w: parseInt(w[1], 10), h: parseInt(h[1], 10) };
     }
   } catch {
     result = null;
@@ -138,151 +115,32 @@ async function decode($, absPath) {
   return result || "fail";
 }
 
-// --- ASCII fallback (terminals without an image protocol) -------------------
-
-// Dark → light. One char per terminal cell; the cell grid's pixel aspect
-// (16 x 34 per cell) is what makes the art geometrically faithful.
-const RAMP = " .:-=+*#%@";
-
-function b64ToBytes(s) {
-  const clean = String(s ?? "").replace(/[^A-Za-z0-9+/=]/g, "").replace(/=+$/, "");
-  const A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  const out = [];
-  let buf = 0;
-  let bits = 0;
-  for (const c of clean) {
-    const v = A.indexOf(c);
-    if (v < 0) continue;
-    buf = (buf << 6) | v;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      out.push((buf >> bits) & 0xff);
-      buf &= (1 << bits) - 1; // drop the consumed byte's bits
-    }
-  }
-  return out;
-}
-
-function le32(b, o) {
-  return ((b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0);
-}
-
-function le16(b, o) {
-  return b[o] | (b[o + 1] << 8);
-}
-
-// True when the terminal can paint an Image element's pixels (kitty, Ghostty
-// and friends). Anything else — plain xterm, screen, a pipe — falls back to an
-// ASCII bitmap, so a preview is always visible.
-async function imageProtocolCapable($) {
-  try {
-    const r = await run($, 'printf %s "$TERM"');
-    return /kitty|ghostty|wezterm|iterm2?|alacritty/i.test(String(r?.stdout ?? ""));
-  } catch {
-    return false;
-  }
-}
-
-// Memoised ASCII bitmaps: key = path|columns|x|rows|fill.
-const asciiCache = new Map();
-
-// Render `absPath` as `columns` x `rows` characters. `fillSquare` crops to the
-// image's centred square first (aspect-fill); otherwise the whole frame is
-// sampled (aspect-fit). Returns null when the pixels cannot be read.
-async function asciiArt($, absPath, columns, rows, fillSquare) {
-  const key = `${absPath}|${columns}x${rows}|${fillSquare ? "f" : "t"}`;
-  if (asciiCache.has(key)) return asciiCache.get(key);
-  let lines = null;
-  try {
-    // Bound the decode: a 24-bit BMP of a large photo would be tens of MB.
-    const bmp = `${TMP_DIR}/${hash(absPath)}.bmp`;
-    const sh = `mkdir -p ${quote(TMP_DIR)} && sips ${quote(absPath)} -Z 200 -s format bmp --out ${quote(bmp)} >/dev/null 2>&1`;
-    const r = await run($, sh);
-    if ((r?.exitCode ?? 1) === 0) {
-      const bytes = b64ToBytes((await $.fs.read(bmp, { as: "bytes" }))?.base64);
-      if (bytes.length > 54 && String.fromCharCode(bytes[0], bytes[1]) === "BM" && le16(bytes, 28) === 24) {
-        const off = le32(bytes, 10);
-        const w = le32(bytes, 18) | 0;
-        let h = le32(bytes, 22) | 0;
-        const topDown = h < 0;
-        h = Math.abs(h);
-        const rowSize = Math.floor((24 * w + 31) / 32) * 4;
-        const lum = [];
-        for (let y = 0; y < h; y++) {
-          const srcY = topDown ? y : h - 1 - y;
-          const rowOff = off + srcY * rowSize;
-          const line = [];
-          for (let x = 0; x < w; x++) {
-            const p = rowOff + x * 3;
-            line.push(0.2126 * bytes[p + 2] + 0.7152 * bytes[p + 1] + 0.0722 * bytes[p]);
-          }
-          lum.push(line);
-        }
-        // Sample window: whole frame to aspect-fit, centred square to fill.
-        let x0 = 0;
-        let y0 = 0;
-        let cw = w;
-        let ch = h;
-        if (fillSquare) {
-          const s = Math.min(w, h);
-          x0 = Math.floor((w - s) / 2);
-          y0 = Math.floor((h - s) / 2);
-          cw = s;
-          ch = s;
-        }
-        lines = [];
-        for (let j = 0; j < rows; j++) {
-          let line = "";
-          for (let i = 0; i < columns; i++) {
-            const xa = x0 + Math.floor((cw * i) / columns);
-            const xb = Math.max(xa + 1, x0 + Math.floor((cw * (i + 1)) / columns));
-            const ya = y0 + Math.floor((ch * j) / rows);
-            const yb = Math.max(ya + 1, y0 + Math.floor((ch * (j + 1)) / rows));
-            let sum = 0;
-            let n = 0;
-            for (let y = ya; y < Math.min(yb, h); y++) {
-              for (let x = xa; x < Math.min(xb, w); x++) {
-                sum += lum[y][x];
-                n++;
-              }
-            }
-            const v = n ? sum / n : 0;
-            line += RAMP[Math.min(RAMP.length - 1, Math.floor((v / 255) * RAMP.length))];
-          }
-          lines.push(line);
-        }
-      }
-    }
-  } catch {
-    lines = null;
-  }
-  asciiCache.set(key, lines);
-  return lines;
-}
-
 // --- drawing one thumbnail ---------------------------------------------------
 
-// One image reference → one node: an Image element where the terminal can paint
-// pixels, an ASCII bitmap where it cannot, the label when nothing decodes.
+// One image reference → one node: the real PNG drawn as an Image element and
+// centered in the row, exactly how the mermaid pane presents its diagrams.
+// `alt` keeps the label so the picture is never silent where paint is absent.
 async function drawThumb($, absPath, label, maxColumns, mode, C) {
-  const { Text, Image } = C;
+  const { Box, Image, Text } = C;
   const decoded = await decode($, absPath);
-  if (!decoded || typeof decoded !== "object" || !decoded.source) {
+  if (!decoded || typeof decoded !== "object" || !decoded.file) {
     return Text({ children: label });
   }
   const sized = sizeFor(decoded.w, decoded.h, maxColumns, mode === "square" ? MAX_BAND_ROWS : MAX_CHAT_ROWS, mode);
-  if (await imageProtocolCapable($)) {
-    return Image({
-      key: hash(absPath),
-      source: decoded.source,
-      columns: sized.columns,
-      rows: sized.rows,
-      alt: label,
-    });
-  }
-  const art = await asciiArt($, absPath, sized.columns, sized.rows, mode === "square");
-  return Text({ children: (art ?? [label]).join("\n") });
+  return Box({
+    width: "100%",
+    alignItems: "center",
+    paddingY: 1,
+    children: [
+      Image({
+        key: hash(absPath),
+        source: { file: decoded.file, format: "png" },
+        columns: sized.columns,
+        rows: sized.rows,
+        alt: label,
+      }),
+    ],
+  });
 }
 
 // --- sizing -----------------------------------------------------------------
@@ -435,7 +293,7 @@ async function updateBand($, text) {
   for (const part of imgParts) {
     const path = part.abs ?? galleryPath(gallery, part.label);
     const decoded = path ? await decode($, path) : null;
-    if (decoded && typeof decoded === "object" && decoded.source) {
+    if (decoded && typeof decoded === "object" && decoded.file) {
       thumbs.push({ key: part.key, label: part.label, path });
     }
   }

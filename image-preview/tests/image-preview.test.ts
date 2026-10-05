@@ -45,14 +45,9 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, term = "xterm-gho
     throw err;
   });
   on("fs.read", (_$: unknown, e: { path: string; as?: string }) => {
-    // A real 1x1 PNG (signature + IHDR + IDAT + IEND) — the engine validates
-    // that Image png payloads decode to an actual PNG. The ASCII fallback
-    // reads its `.bmp` conversion as bytes instead. The event is one arg.
-    const p = String(e?.path ?? "");
-    if (p.endsWith(".bmp")) return { value: { base64: BMP_B64 } };
-    if (e?.as === "bytes") {
-      return { value: { base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwABAQEAsTj2FAAAAABJRU5ErkJggg==" } };
-    }
+    // The engine reads an Image's { file, format: "png" } source by name; the
+    // bytes answer stays valid PNG for surfaces that want the payload.
+    if (e?.as === "bytes") return { value: { base64: PNG_B64 } };
     return { value: "" };
   });
 
@@ -100,15 +95,16 @@ describe("image-preview", () => {
     expect(await ui.find({ type: "Text", text: /done — see/ })).toBeDefined();
   });
 
-  test("a plain terminal draws an ASCII bitmap instead of an Image", async ($, on) => {
-    stubWorld(on, "xterm-256color");
+  test("the thumbnail sources a real PNG file, mermaid-style", async ($, on) => {
+    stubWorld(on);
     on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.text ?? "")] }));
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
 
     const ui = await mount($, "UserMessage", { text: `look at ${WORK}/pic.png`, origin: { kind: "composer" }, isExpanded: true }, { columns: 120, rows: 40 });
-    expect(await ui.find({ type: "Image" })).not.toBeDefined();
-    // The bitmap's brightest row maps to '@' on the ramp — art, not the label.
-    expect(await ui.find({ type: "Text", text: /[@]/ })).toBeDefined();
+    const tree = JSON.stringify(await ui.drawn());
+    expect(tree).toContain('"format":"png"');
+    expect(tree).toContain(".png");
+    expect(await ui.find({ type: "Image" })).toBeDefined();
   });
 
   test("a prompt with no image draws nothing extra (falls through)", async ($, on) => {    stubWorld(on);
