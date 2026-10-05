@@ -295,21 +295,24 @@ function scan(text, cwd) {
   let m;
   PATH_RE.lastIndex = 0;
   while ((m = PATH_RE.exec(text))) {
-    hits.push({ index: m.index, end: m.index + m[0].length, abs: resolvePath(m[1], cwd), label: basename(m[1]) });
+    hits.push({ index: m.index, end: m.index + m[0].length, token: m[1], abs: resolvePath(m[1], cwd), label: basename(m[1]) });
   }
   REF_RE.lastIndex = 0;
   while ((m = REF_RE.exec(text))) {
-    hits.push({ index: m.index, end: m.index + m[0].length, abs: null, label: `[Image #${m[1]}]`, num: parseInt(m[1], 10) });
+    hits.push({ index: m.index, end: m.index + m[0].length, token: m[0], abs: null, label: `[Image #${m[1]}]`, num: parseInt(m[1], 10) });
   }
   hits.sort((a, b) => a.index - b.index);
 
   const parts = [];
   let last = 0;
   for (const hit of hits) {
-    const runText = text.slice(last, hit.index).trimEnd();
+    // Verbatim slices (no trimming): the drawn row keeps the prompt's own
+    // formatting, newlines included.
+    const runText = text.slice(last, hit.index);
     if (runText) parts.push({ kind: "text", text: runText });
     parts.push({
       kind: "img",
+      token: hit.token,
       num: hit.num,
       abs: hit.abs,
       label: hit.abs ? hit.label : `[Image #${hit.num}]`,
@@ -317,7 +320,7 @@ function scan(text, cwd) {
     });
     last = hit.end;
   }
-  const tail = text.slice(last).trimEnd();
+  const tail = text.slice(last);
   if (tail) parts.push({ kind: "text", text: tail });
   return parts;
 }
@@ -335,13 +338,12 @@ async function buildNodes($, parts, gallery, C) {
       nodes.push(Text({ wrap: "wrap", children: part.text }));
       continue;
     }
+    // Addition, never replacement: the reference's own text stays in the row
+    // (pushed verbatim below), and the thumbnail is inserted right after it.
+    // An unresolvable reference simply adds nothing.
     const path = part.abs ?? galleryPath(gallery, part.label);
-    if (!path) {
-      // The gallery doesn't hold that index: keep the label so the reference
-      // is never lost.
-      nodes.push(Text({ children: part.label }));
-      continue;
-    }
+    if (!path) continue;
+    nodes.push(Text({ children: part.token }));
     nodes.push(await drawThumb($, path, part.label, C.maxColumns, C));
   }
   return nodes;
