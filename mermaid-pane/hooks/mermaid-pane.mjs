@@ -559,7 +559,7 @@ export function register(on) {
     await $.command.register({
       name: "mermaid",
       description: "Mermaid charts: session gallery pane",
-      argumentHint: "[ascii | image | close | profile]",
+      argumentHint: "[ascii|image|close|profile]",
     });
     return r;
   });

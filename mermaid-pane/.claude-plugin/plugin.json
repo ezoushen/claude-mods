@@ -1,6 +1,6 @@
 {
   "name": "mermaid-pane",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Renders mermaid code blocks from the conversation in a docked pane, with a one-key browser preview.",
   "author": { "name": "ezou" },
   "types": "./types/index.d.ts"
