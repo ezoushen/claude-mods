@@ -106,9 +106,9 @@ describe("image-preview", () => {
     expect(tree).toContain('"format":"png"');
     expect(tree).toContain(".png");
     expect(await ui.find({ type: "Image" })).toBeDefined();
-    // Addition, not replacement: the path keeps its own Text in the row, with
-    // the Image block added right after it.
-    expect(tree).toContain('"children":["/work/pic.png"]');
+    // Identical to a no-image block: the engine's own Text carries the whole
+    // prompt verbatim, with the Image block added below it — nothing rewritten.
+    expect(tree).toContain('"children":["look at /work/pic.png"]');
     // The alt degrades to the ASCII bitmap of the same picture (mermaid's
     // asciiFor): the stub BMP's brightest rows map to '@' on the ramp.
     expect(tree).toContain("@");

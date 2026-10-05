@@ -288,63 +288,35 @@ function fit(W, H, maxColumns, maxRows) {
 // Each image reference carries an absolute path (possibly null, resolved later
 // against the gallery) and a short label (basename, or [Image #N]) as alt, so
 // the sentence is never lost.
-function scan(text, cwd) {
+// The image references in `text`, in document order: real paths and gallery
+// tokens alike, each with its own text untouched — the row's text is never
+// rewritten, so nothing here carries the surrounding prose.
+function imageRefs(text, cwd) {
   if (!text || typeof text !== "string") return [];
-  const hits = [];
-
+  const refs = [];
   let m;
   PATH_RE.lastIndex = 0;
   while ((m = PATH_RE.exec(text))) {
-    hits.push({ index: m.index, end: m.index + m[0].length, token: m[1], abs: resolvePath(m[1], cwd), label: basename(m[1]) });
+    refs.push({ token: m[1], abs: resolvePath(m[1], cwd), label: basename(m[1]), key: hash(m[1]) });
   }
   REF_RE.lastIndex = 0;
   while ((m = REF_RE.exec(text))) {
-    hits.push({ index: m.index, end: m.index + m[0].length, token: m[0], abs: null, label: `[Image #${m[1]}]`, num: parseInt(m[1], 10) });
+    refs.push({ token: m[0], num: parseInt(m[1], 10), abs: null, label: `[Image #${m[1]}]`, key: hash(`[Image #${m[1]}]`) });
   }
-  hits.sort((a, b) => a.index - b.index);
-
-  const parts = [];
-  let last = 0;
-  for (const hit of hits) {
-    // Verbatim slices (no trimming): the drawn row keeps the prompt's own
-    // formatting, newlines included.
-    const runText = text.slice(last, hit.index);
-    if (runText) parts.push({ kind: "text", text: runText });
-    parts.push({
-      kind: "img",
-      token: hit.token,
-      num: hit.num,
-      abs: hit.abs,
-      label: hit.abs ? hit.label : `[Image #${hit.num}]`,
-      key: hash(hit.abs || `[Image #${hit.num}]`),
-    });
-    last = hit.end;
-  }
-  const tail = text.slice(last);
-  if (tail) parts.push({ kind: "text", text: tail });
-  return parts;
+  return refs;
 }
 
 // --- building render nodes --------------------------------------------------
 
-// Turn scanned parts into element nodes (Text / Image) in document order, using
-// the given element constructors and sizing mode.
-async function buildNodes($, parts, gallery, C) {
-  const { Text } = C;
+// One thumbnail per resolvable image reference in `text`, in document order.
+async function collectThumbs($, text, C) {
+  const cwd = (await $.session.cwd().catch(() => "/")).trim();
+  const gallery = await loadGallery($);
   const nodes = [];
-
-  for (const part of parts) {
-    if (part.kind === "text") {
-      nodes.push(Text({ wrap: "wrap", children: part.text }));
-      continue;
-    }
-    // Addition, never replacement: the reference's own text stays in the row
-    // (pushed verbatim below), and the thumbnail is inserted right after it.
-    // An unresolvable reference simply adds nothing.
-    const path = part.abs ?? galleryPath(gallery, part.label);
+  for (const ref of imageRefs(text, cwd)) {
+    const path = ref.abs ?? galleryPath(gallery, ref.label);
     if (!path) continue;
-    nodes.push(Text({ children: part.token }));
-    nodes.push(await drawThumb($, path, part.label, C.maxColumns, C));
+    nodes.push(await drawThumb($, path, ref.label, C.maxColumns, C));
   }
   return nodes;
 }
@@ -381,16 +353,16 @@ export function register(on) {
     const text = props.text;
     if (typeof text !== "string" || !HAS_IMAGE.test(text)) return next(e);
 
-    const cwd = (await $.session.cwd().catch(() => "/")).trim();
-    const gallery = await loadGallery($);
-    const parts = scan(text, cwd);
-    if (!parts.some((p) => p.kind === "img")) return next(e);
-
     const maxColumns = e?.viewport?.columns ?? props.bodyColumns ?? 60;
     const C = { ...$.ui.resolve(e), maxColumns };
-    const nodes = await buildNodes($, parts, gallery, C);
-    const { Box } = C;
-    return Box({ flexDirection: "column", gap: 1, children: nodes });
+    const nodes = await collectThumbs($, text, C);
+    if (!nodes.length) return next(e);
+
+    // The engine's own block, untouched — identical to a no-image prompt —
+    // with the thumbnails added below it.
+    const body = await next(e);
+    const bodyNode = typeof body === "string" ? C.Text({ children: body }) : body;
+    return C.Box({ flexDirection: "column", children: [bodyNode, ...nodes] });
   });
 
   // Agent reply rows: an image path the model mentions draws its thumbnail
@@ -400,20 +372,9 @@ export function register(on) {
     const text = props.text;
     if (typeof text !== "string" || !HAS_IMAGE.test(text)) return next(e);
 
-    const cwd = (await $.session.cwd().catch(() => "/")).trim();
-    const gallery = await loadGallery($);
-    const parts = scan(text, cwd);
-    if (!parts.some((p) => p.kind === "img")) return next(e);
-
     const maxColumns = e?.viewport?.columns ?? props.bodyColumns ?? 60;
     const C = { ...$.ui.resolve(e), maxColumns };
-    const nodes = [];
-    for (const part of parts) {
-      if (part.kind !== "img") continue;
-      const path = part.abs ?? galleryPath(gallery, part.label);
-      if (!path) continue;
-      nodes.push(await drawThumb($, path, part.label, maxColumns, C));
-    }
+    const nodes = await collectThumbs($, text, C);
     if (!nodes.length) return next(e);
 
     const body = await next(e);
