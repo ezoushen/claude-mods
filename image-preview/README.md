@@ -7,6 +7,12 @@ Inline image previews for Claude Code, like the desktop GUI app.
 - **Prompt editor**: the current draft's image references draw a square strip
   above the input box (1:1 aspect-fill, max 4 rows), updated as you type.
 - `/image <path...>` stores paths; reference them as `[Image #N]`.
+- **Pasted images**: Claude Code inserts an `[Image #N]` token for a paste but
+  keeps the bytes to itself (the mod API never exposes them). On macOS the mod
+  grabs the picture still on the clipboard (`osascript` → `/tmp/image-preview/
+  pasted-N.png`) and previews that — so paste → preview works for the picture
+  you just pasted. The first grab may raise a one-time macOS Automation
+  permission prompt for the terminal app.
 
 ## How images render
 

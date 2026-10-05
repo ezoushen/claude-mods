@@ -329,6 +329,7 @@ function scan(text, cwd) {
     if (runText) parts.push({ kind: "text", text: runText });
     parts.push({
       kind: "img",
+      num: hit.num,
       abs: hit.abs,
       label: hit.abs ? hit.label : `[Image #${hit.num}]`,
       key: hash(hit.abs || `[Image #${hit.num}]`),
@@ -372,6 +373,33 @@ function galleryPath(gallery, label) {
   return gallery?.[parseInt(m[1], 10) - 1] ?? null;
 }
 
+// --- pasted images -----------------------------------------------------------
+
+// The engine keeps a pasted image's bytes to itself: the draft only says
+// [Image #N] and the submit attachment names its kind, never its bytes. But on
+// macOS the picture is still on the clipboard right after the paste, so grab
+// it there — once per token index, until the memo is reset (see below).
+const pasteMemo = new Map(); // token number -> /tmp png path | null
+
+async function clipboardImage($, num) {
+  if (pasteMemo.has(num)) return pasteMemo.get(num);
+  const path = `${TMP_DIR}/pasted-${num}.png`;
+  const script = [
+    "set pngData to (the clipboard as «class PNGf»)",
+    `set fh to open for access POSIX file "${path}" with write permission`,
+    "set eof fh to 0",
+    "write pngData to fh",
+    "close access fh",
+  ].join("\n");
+  const sh = `mkdir -p ${quote(TMP_DIR)} ; osascript <<'EOS' 2>/dev/null\n${script}\nEOS`;
+  await run($, sh).catch(() => undefined);
+  // A clipboard without a picture (or a refused grab) makes the probe fail.
+  const probe = await run($, `sips -g pixelWidth ${quote(path)} 2>/dev/null`).catch(() => undefined);
+  const ok = (probe?.exitCode ?? 1) === 0 && /pixelWidth/.test(String(probe?.stdout ?? ""));
+  pasteMemo.set(num, ok ? path : null);
+  return pasteMemo.get(num);
+}
+
 // --- state ------------------------------------------------------------------
 
 async function loadState($) {
@@ -400,7 +428,11 @@ async function rememberAbove($, draft, thumbs) {
 
 // Recompute the editor-band thumbnails from a draft and persist them.
 async function updateBand($, text) {
-  if (!HAS_IMAGE.test(text)) {
+  const refs = HAS_IMAGE.test(text) ? scan(text, "/").filter((p) => p.kind === "img") : [];
+  if (!refs.length) {
+    // No image references in the box: the band empties and any pasted-image
+    // grab goes stale (a later paste is a new [Image #1]).
+    pasteMemo.clear();
     await rememberAbove($, "", []);
     return;
   }
@@ -409,12 +441,14 @@ async function updateBand($, text) {
   const parts = scan(text, cwd);
   const imgParts = parts.filter((p) => p.kind === "img");
   if (!imgParts.length) {
+    pasteMemo.clear();
     await rememberAbove($, "", []);
     return;
   }
   const thumbs = [];
   for (const part of imgParts) {
-    const path = part.abs ?? galleryPath(gallery, part.label);
+    let path = part.abs ?? galleryPath(gallery, part.label);
+    if (!path) path = await clipboardImage($, part.num); // pasted, not stored
     const decoded = path ? await decode($, path) : null;
     if (decoded && typeof decoded === "object" && decoded.file) {
       thumbs.push({ key: part.key, label: part.label, path });
@@ -447,6 +481,7 @@ export function register(on) {
   on("prompt.submit", async ($, e, next) => {
     const r = await next(e);
     if (r && !r.drop) {
+      pasteMemo.clear(); // a later paste is a new [Image #1]
       await rememberAbove($, "", []);
       try {
         await $.ui.invalidate("ui.render");
