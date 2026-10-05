@@ -1,28 +1,24 @@
-// image-preview — preview image paths inline, like the desktop GUI app.
+// image-preview — render image paths inline, like the desktop GUI app.
 //
-// Two things, keyed on the same scan of text:
-//   1. Chat rows (UserMessage): every image reference in the prompt draws an
-//      inline thumbnail, aspect-fit, never taller than 10 rows.
-//   2. Above the prompt editor (AbovePrompt band): the current draft's image
-//      references draw a small strip, square (1:1) and aspect-filled, no taller
-//      than 4 rows — updated as the person types.
+// Two render paths, keyed on the same scan of text:
+//   1. UserMessage rows: every image reference in the prompt draws an inline
+//      thumbnail, aspect-fill, never taller than 10 rows.
+//   2. AssistantMessage rows: an image path the model mentions draws the same
+//      thumbnail in the reply row.
 //
 // An "image reference" is either a real file path ending in a supported image
 // extension (.png .jpg .jpeg .gif .webp .bmp .tif .tiff .heic .heif .ico .svg),
 // or an [Image #N] token, N resolved against the gallery the /image command
-// stores. Both are decoded once (sips -> PNG -> base64, or a file the terminal
-// reads) and memoised by path + size + mtime; pixels never cross $.
-
+// stores. Decoded once (sips -> a bounded PNG the terminal reads) and memoised
+// by path; pixels never cross $.
 const NS = { plugin: "image-preview", key: "state" };
 const TMP_DIR = "/tmp/image-preview";
 
-// A terminal char is ~2.125x taller than wide (16px x 34px). A square (1:1) box
-// of `rows` rows is `rows * 34/16` columns wide; a picture scaled to that box
-// aspect-fills (crops) without distortion.
+// A terminal char is ~2.125x taller than wide (16px x 34px). A block whose
+// cell aspect matches the picture's pixel aspect shows it undistorted.
 const CELL_H_OVER_CELL_W = 34 / 16;
 
 const MAX_CHAT_ROWS = 10; // chat thumbnail height cap
-const MAX_BAND_ROWS = 4; // prompt-editor thumbnail height cap
 
 // A whitespace-delimited token ending in a supported image extension.
 const PATH_RE =
@@ -244,14 +240,14 @@ async function asciiArt($, absPath, columns, rows, fillSquare) {
 // centered in the row, exactly how the mermaid pane presents its diagrams.
 // The alt carries the ASCII bitmap of the same picture, so a terminal that
 // cannot paint degrades to art (mermaid's asciiFor) instead of a bare label.
-async function drawThumb($, absPath, label, maxColumns, mode, C) {
+async function drawThumb($, absPath, label, maxColumns, C) {
   const { Box, Image, Text } = C;
   const decoded = await decode($, absPath);
   if (!decoded || typeof decoded !== "object" || !decoded.file) {
     return Text({ children: label });
   }
-  const sized = sizeFor(decoded.w, decoded.h, maxColumns, mode === "square" ? MAX_BAND_ROWS : MAX_CHAT_ROWS, mode);
-  const art = await asciiArt($, absPath, sized.columns, sized.rows, mode === "square");
+  const sized = fit(decoded.w, decoded.h, maxColumns, MAX_CHAT_ROWS);
+  const art = await asciiArt($, absPath, sized.columns, sized.rows, false);
   return Box({
     width: "100%",
     alignItems: "center",
@@ -284,21 +280,6 @@ function fit(W, H, maxColumns, maxRows) {
     rows = Math.max(1, Math.round(columns / ratio));
   }
   return { columns, rows };
-}
-
-// Square box (1:1) filled by aspect-fill, <= maxRows tall.
-function squareBox(maxColumns, maxRows) {
-  let rows = Math.min(maxRows, 4);
-  let columns = Math.round(rows * CELL_H_OVER_CELL_W);
-  while (columns > maxColumns && rows > 1) {
-    rows -= 1;
-    columns = Math.round(rows * CELL_H_OVER_CELL_W);
-  }
-  return { rows, columns: Math.min(columns, maxColumns) };
-}
-
-function sizeFor(w, h, maxColumns, maxRows, mode) {
-  return mode === "square" ? squareBox(maxColumns, maxRows) : fit(w, h, maxColumns, maxRows);
 }
 
 // --- scanning a prompt for image references --------------------------------
@@ -345,7 +326,7 @@ function scan(text, cwd) {
 
 // Turn scanned parts into element nodes (Text / Image) in document order, using
 // the given element constructors and sizing mode.
-async function buildNodes($, parts, gallery, mode, C) {
+async function buildNodes($, parts, gallery, C) {
   const { Text } = C;
   const nodes = [];
 
@@ -361,7 +342,7 @@ async function buildNodes($, parts, gallery, mode, C) {
       nodes.push(Text({ children: part.label }));
       continue;
     }
-    nodes.push(await drawThumb($, path, part.label, C.maxColumns, mode, C));
+    nodes.push(await drawThumb($, path, part.label, C.maxColumns, C));
   }
   return nodes;
 }
@@ -371,33 +352,6 @@ function galleryPath(gallery, label) {
   const m = /\[Image #(\d+)\]/.exec(label);
   if (!m) return null;
   return gallery?.[parseInt(m[1], 10) - 1] ?? null;
-}
-
-// --- pasted images -----------------------------------------------------------
-
-// The engine keeps a pasted image's bytes to itself: the draft only says
-// [Image #N] and the submit attachment names its kind, never its bytes. But on
-// macOS the picture is still on the clipboard right after the paste, so grab
-// it there — once per token index, until the memo is reset (see below).
-const pasteMemo = new Map(); // token number -> /tmp png path | null
-
-async function clipboardImage($, num) {
-  if (pasteMemo.has(num)) return pasteMemo.get(num);
-  const path = `${TMP_DIR}/pasted-${num}.png`;
-  const script = [
-    "set pngData to (the clipboard as «class PNGf»)",
-    `set fh to open for access POSIX file "${path}" with write permission`,
-    "set eof fh to 0",
-    "write pngData to fh",
-    "close access fh",
-  ].join("\n");
-  const sh = `mkdir -p ${quote(TMP_DIR)} ; osascript <<'EOS' 2>/dev/null\n${script}\nEOS`;
-  await run($, sh).catch(() => undefined);
-  // A clipboard without a picture (or a refused grab) makes the probe fail.
-  const probe = await run($, `sips -g pixelWidth ${quote(path)} 2>/dev/null`).catch(() => undefined);
-  const ok = (probe?.exitCode ?? 1) === 0 && /pixelWidth/.test(String(probe?.stdout ?? ""));
-  pasteMemo.set(num, ok ? path : null);
-  return pasteMemo.get(num);
 }
 
 // --- state ------------------------------------------------------------------
@@ -416,86 +370,9 @@ async function loadGallery($) {
   return Array.isArray(s.gallery) ? s.gallery : [];
 }
 
-// Persist the draft's decoded thumbnails so the AbovePrompt band (which never
-// receives the draft text in its props) can draw them. Called from prompt.edit.
-async function rememberAbove($, draft, thumbs) {
-  const s = await loadState($);
-  const gallery = Array.isArray(s.gallery) ? s.gallery : [];
-  await $.state.set(NS, { state: { gallery, band: { draft, images: thumbs } } });
-}
-
-// --- registration ------------------------------------------------------------
-
-// Recompute the editor-band thumbnails from a draft and persist them.
-async function updateBand($, text) {
-  const refs = HAS_IMAGE.test(text) ? scan(text, "/").filter((p) => p.kind === "img") : [];
-  if (!refs.length) {
-    // No image references in the box: the band empties and any pasted-image
-    // grab goes stale (a later paste is a new [Image #1]).
-    pasteMemo.clear();
-    await rememberAbove($, "", []);
-    return;
-  }
-  const cwd = (await $.session.cwd().catch(() => "/")).trim();
-  const gallery = await loadGallery($);
-  const parts = scan(text, cwd);
-  const imgParts = parts.filter((p) => p.kind === "img");
-  if (!imgParts.length) {
-    pasteMemo.clear();
-    await rememberAbove($, "", []);
-    return;
-  }
-  const thumbs = [];
-  for (const part of imgParts) {
-    let path = part.abs ?? galleryPath(gallery, part.label);
-    if (!path) path = await clipboardImage($, part.num); // pasted, not stored
-    const decoded = path ? await decode($, path) : null;
-    if (decoded && typeof decoded === "object" && decoded.file) {
-      thumbs.push({ key: part.key, label: part.label, path });
-    }
-  }
-  await rememberAbove($, text, thumbs);
-}
-
-// One handler for both ways a draft changes: prompt.edit (each keystroke) and
-// prompt.fill (a plugin or the engine writing the box). Both results carry the
-// resulting draft in `.text` — the edit input's own `text` is the pre-edit
-// draft, so reading it there would lag the band a keystroke behind.
-async function bandHook($, e, next) {
-  const r = await next(e);
-  const text = typeof r?.text === "string" ? r.text : String(e?.text ?? "");
-  await updateBand($, text);
-  try {
-    await $.ui.invalidate("ui.render");
-  } catch {
-    // no ui.render subscription yet; the next edit redraws
-  }
-  return r;
-}
-
 export function register(on) {
-  // Live prompt-box editing: recompute the editor-band thumbnails and re-run
-  // ui.render so the AbovePrompt band redraws with fresh previews.
-    // The prompt entered: the draft is gone, so the editor-band preview goes
-  // with it. A dropped submit (a hook refused) keeps the box — keep the art.
-  on("prompt.submit", async ($, e, next) => {
-    const r = await next(e);
-    if (r && !r.drop) {
-      pasteMemo.clear(); // a later paste is a new [Image #1]
-      await rememberAbove($, "", []);
-      try {
-        await $.ui.invalidate("ui.render");
-      } catch {
-        // no ui.render subscription yet
-      }
-    }
-    return r;
-  });
-  on("prompt.edit", bandHook);
-  on("prompt.fill", bandHook);
-
   // Chat row with image references: redraw the row as a column of text +
-  // images (aspect-fit, <= 10 rows).
+  // images (aspect-fill, <= 10 rows).
   on("ui.render", { component: "UserMessage" }, async ($, e, next) => {
     const props = e?.props ?? {};
     if (props.origin?.kind !== "composer") return next(e);
@@ -509,7 +386,7 @@ export function register(on) {
 
     const maxColumns = e?.viewport?.columns ?? props.bodyColumns ?? 60;
     const C = { ...$.ui.resolve(e), maxColumns };
-    const nodes = await buildNodes($, parts, gallery, "fit", C);
+    const nodes = await buildNodes($, parts, gallery, C);
     const { Box } = C;
     return Box({ flexDirection: "column", gap: 1, children: nodes });
   });
@@ -533,38 +410,13 @@ export function register(on) {
       if (part.kind !== "img") continue;
       const path = part.abs ?? galleryPath(gallery, part.label);
       if (!path) continue;
-      nodes.push(await drawThumb($, path, part.label, maxColumns, "fit", C));
+      nodes.push(await drawThumb($, path, part.label, maxColumns, C));
     }
     if (!nodes.length) return next(e);
 
     const body = await next(e);
     const bodyNode = typeof body === "string" ? C.Text({ children: body }) : body;
     return C.Box({ flexDirection: "column", gap: 1, children: [bodyNode, ...nodes] });
-  });
-
-  // Above the prompt editor: draw the stored thumbnails (square, aspect-fill,
-  // <= 4 rows) above the band's own content.
-  on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
-    const resolved = $.ui.resolve(e);
-    const { Box, Text } = resolved;
-    const state = await loadState($);
-    const bodyColumns = e?.props?.bodyColumns ?? e?.viewport?.columns ?? 80;
-    const thumbs = state?.band?.images ?? [];
-
-    let drawn = false;
-    const children = [];
-    if (thumbs.length) {
-      drawn = true;
-      for (const th of thumbs) {
-        children.push(await drawThumb($, th.path, th.label, bodyColumns, "square", resolved));
-      }
-    }
-
-    if (!drawn) return next(e);
-
-    const body = await next(e);
-    const bodyNode = typeof body === "string" ? Text({ children: body }) : body;
-    return Box({ flexDirection: "column", gap: 1, children: [bodyNode, ...children] });
   });
 
   // Store image paths so they can be referenced as [Image #N].
@@ -595,7 +447,7 @@ export function register(on) {
       return { text: gallery.length ? gallery.map((p, i) => `[Image #${i + 1}]  ${p}`).join("\n") : "Gallery empty." };
     }
     if (/^(clear|reset)$/.test(arg)) {
-      await $.state.set(NS, { state: { gallery: [], band: { draft: "", images: [] } } });
+      await $.state.set(NS, { state: { gallery: [] } });
       return { text: "image-preview gallery cleared." };
     }
 
@@ -612,8 +464,8 @@ export function register(on) {
       added.push(abs);
     }
     if (added.length) {
-      // Reset the editor-band cache so a fresh edit recomputes from the gallery.
-      await $.state.set(NS, { state: { gallery, band: { draft: "", images: [] } } });
+      // Reset the stored state so a fresh prompt recomputes from the gallery.
+      await $.state.set(NS, { state: { gallery } });
       const tokens = added.map((p) => `[Image #${gallery.indexOf(p) + 1}]`);
       return { text: `Stored ${added.length} image${added.length === 1 ? "" : "s"}:` + tokens.map((t) => `\n${t}`).join("") };
     }

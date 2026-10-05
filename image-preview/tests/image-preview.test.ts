@@ -124,7 +124,8 @@ describe("image-preview", () => {
     expect(Math.abs(node.props.columns / node.props.rows - want)).toBeLessThan(0.5);
   });
 
-  test("a prompt with no image draws nothing extra (falls through)", async ($, on) => {    stubWorld(on);
+  test("a prompt with no image draws nothing extra (falls through)", async ($, on) => {
+    stubWorld(on);
     on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.text ?? "")] }));
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
 
@@ -145,39 +146,6 @@ describe("image-preview", () => {
     expect(await ui.find({ type: "Image" })).toBeDefined();
   });
 
-  test("a pasted [Image #N] previews from the clipboard when the gallery is empty", async ($, on) => {
-    stubWorld(on);
-    on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.bandText ?? "")] }));
-    on("prompt.fill", (_$: unknown, e: any) => ({ isFilled: true, text: e?.text ?? "", cursor: String(e?.text ?? "").length }));
-    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
-
-    // A paste lands in the draft as an [Image #N] token; nothing was stored
-    // via /image, so the mod grabs the picture still on the clipboard.
-    await $.prompt.fill({ text: "look at [Image #1]", mode: "replace", origin: { kind: "plugin", name: "test-filler" } });
-    const ui = await mount($, "AbovePrompt", { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 16 } }, { columns: 120, rows: 40 });
-    const tree = JSON.stringify(await ui.drawn());
-    expect(await ui.find({ type: "Image" })).toBeDefined();
-    // Sourced from the clipboard grab, decoded to its own PNG like any path.
-    expect(tree).toContain('"format":"png"');
-    expect(tree).not.toContain("[Image #1]");
-  });
-
-  test("a submitted prompt clears the editor-band preview", async ($, on) => {
-    stubWorld(on);
-    on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.bandText ?? "")] }));
-    on("prompt.fill", (_$: unknown, e: any) => ({ isFilled: true, text: e?.text ?? "", cursor: String(e?.text ?? "").length }));
-    on("prompt.submit", (_$: unknown, e: any) => ({ text: e?.text ?? "" }));
-    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
-
-    await $.prompt.fill({ text: "paste /work/pic.png", mode: "replace", origin: { kind: "plugin", name: "test-filler" } });
-    const before = await mount($, "AbovePrompt", { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 16 } }, { columns: 120, rows: 40 });
-    expect(await before.find({ type: "Image" })).toBeDefined();
-
-    await $.prompt.submit({ text: "paste /work/pic.png" });
-    const after = await mount($, "AbovePrompt", { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 16 } }, { columns: 120, rows: 40 });
-    expect(await after.find({ type: "Image" })).not.toBeDefined();
-  });
-
   test("/image clear empties the gallery", async ($, on) => {
     stubWorld(on);
     on("ui.render", (_$: unknown, _e: any) => ({ type: "Text", props: {}, children: [] }));
@@ -191,16 +159,4 @@ describe("image-preview", () => {
     expect((mem["image-preview:state"] as any).state.gallery).toHaveLength(0);
   });
 
-  test("AbovePrompt band draws editor thumbnails updated from prompt.edit", async ($, on) => {
-    stubWorld(on);
-    on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.bandText ?? "")] }));
-    on("prompt.fill", (_$: unknown, e: any) => ({ isFilled: true, text: e?.text ?? "", cursor: String(e?.text ?? "").length }));
-    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
-
-    // Write an image path into the prompt box as the draft (mode replace).
-    await $.prompt.fill({ text: "paste /work/pic.png", mode: "replace", origin: { kind: "plugin", name: "test-filler" } });
-
-    const ui = await mount($, "AbovePrompt", { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 16 } }, { columns: 120, rows: 40 });
-    expect(await ui.find({ type: "Image" })).toBeDefined();
-  });
 });

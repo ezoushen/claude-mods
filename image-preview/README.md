@@ -1,18 +1,12 @@
 # image-preview
 
-Inline image previews for Claude Code, like the desktop GUI app.
+Render image paths inline in Claude Code, like the desktop GUI app.
 
-- **Chat rows** (user and agent messages): every image path or `[Image #N]`
-  token draws a thumbnail, aspect-fit, never taller than 10 rows.
-- **Prompt editor**: the current draft's image references draw a square strip
-  above the input box (1:1 aspect-fill, max 4 rows), updated as you type.
+- **User prompt rows**: an image path in the sent prompt draws a thumbnail,
+  aspect-fill, never taller than 10 rows.
+- **Agent reply rows**: an image path the model mentions draws the same
+  thumbnail in the reply row.
 - `/image <path...>` stores paths; reference them as `[Image #N]`.
-- **Pasted images**: Claude Code inserts an `[Image #N]` token for a paste but
-  keeps the bytes to itself (the mod API never exposes them). On macOS the mod
-  grabs the picture still on the clipboard (`osascript` → `/tmp/image-preview/
-  pasted-N.png`) and previews that — so paste → preview works for the picture
-  you just pasted. The first grab may raise a one-time macOS Automation
-  permission prompt for the terminal app.
 
 ## How images render
 
