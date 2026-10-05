@@ -558,7 +558,8 @@ export function register(on) {
     const r = await next(e);
     await $.command.register({
       name: "mermaid",
-      description: "Mermaid charts: open pane, /mermaid ascii|image to pick rendering, /mermaid close",
+      description: "Mermaid charts: session gallery pane",
+      argumentHint: "[ascii | image | close | profile]",
     });
     return r;
   });

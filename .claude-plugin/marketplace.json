@@ -11,7 +11,7 @@
     {
       "name": "mermaid-pane",
       "description": "Presents mermaid code blocks as ASCII art or images (mmdc locally, mermaid.ink as fallback) — embedded in replies with a /mermaid pane for the session gallery.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "source": "./mermaid-pane",
       "author": {
         "name": "ezoushen"
