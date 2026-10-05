@@ -1,0 +1,160 @@
+import { describe, expect, test } from "claude-code/testing";
+
+type AnyHook = (...args: any[]) => unknown;
+
+// In-memory $.state so the mod's single `state` key can be read and written.
+const mem: Record<string, unknown> = {};
+const WORK = "/work";
+
+// A valid 6x4 24-bit BMP (luminance rows 0/85/170/255) — what the ASCII
+// fallback path reads back after its `sips … -s format bmp` conversion.
+const BMP_B64 =
+  "Qk2GAAAAAAAAADYAAAAoAAAABgAAAAQAAAABABgAAAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABVVVVVVVVVVVVVVVVVVVVVVVUAAKqqqqqqqqqqqqqqqqqqqqqqqgAA////////////////////////AAA=";
+
+// Build a world where any `*.png`/`*.jpg` path is a real file, `sips`
+// converts it to 400x300, and `$.fs.read` yields some base64 bytes.
+// `term` decides whether the terminal can paint Image pixels (kitty-like) or
+// gets the ASCII fallback (plain xterm).
+function stubWorld(on: (event: string, hook: AnyHook) => void, term = "xterm-ghostty") {
+  for (const k of Object.keys(mem)) delete mem[k]; // fresh state per test
+  on("session.start", () => ({ cwd: WORK }));
+  on("session.messages", () => ({ value: [] }));
+  on("session.cwd", () => ({ value: WORK }));
+
+  on("state.get", (_$: unknown, e: { plugin: string; key: string }) => {
+    const k = `${e.plugin}:${e.key}`;
+    if (!(k in mem)) mem[k] = { state: { gallery: [], band: { draft: "", images: [] } } };
+    // Envelope { value: ... } + real result { value, version }: $.state.get
+    // resolves to the inner object, whose .value is the stored state.
+    return { value: { value: mem[k], version: 0 } };
+  });
+  on("state.set", (_$: unknown, e: { plugin: string; key: string; value: unknown }) => {
+    mem[`${e.plugin}:${e.key}`] = e.value;
+    return { value: { isSet: true, version: 0 } };
+  });
+
+  on("command.register", () => ({ value: { command: "image" } }));
+  on("ui.invalidate", () => ({ value: {} }));
+
+  on("fs.stat", (_$: unknown, path: string) => {
+    if (/\.(png|jpg|jpeg|gif|webp|bmp|tif(f)?|heic|heif|ico|svg)$/i.test(String(path))) {
+      return { value: { kind: "file", size: 4096, mtimeMs: 1_700_000_000_000 } };
+    }
+    const err: any = new Error(`ENOENT: ${path}`);
+    err.code = "ENOENT";
+    throw err;
+  });
+  on("fs.read", (_$: unknown, e: { path: string; as?: string }) => {
+    // A real 1x1 PNG (signature + IHDR + IDAT + IEND) — the engine validates
+    // that Image png payloads decode to an actual PNG. The ASCII fallback
+    // reads its `.bmp` conversion as bytes instead. The event is one arg.
+    const p = String(e?.path ?? "");
+    if (p.endsWith(".bmp")) return { value: { base64: BMP_B64 } };
+    if (e?.as === "bytes") {
+      return { value: { base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwABAQEAsTj2FAAAAABJRU5ErkJggg==" } };
+    }
+    return { value: "" };
+  });
+
+  on("process.run", (_$: unknown, cmd: unknown) => {
+    const s = JSON.stringify(cmd);
+    if (/TERM/.test(s)) return { value: { exitCode: 0, stdout: term } };
+    if (s.indexOf("sips") >= 0) {
+      return { value: { exitCode: 0, stdout: "pixelWidth: 400\npixelHeight: 300" } };
+    }
+    return { value: { exitCode: 1, stdout: "", stderr: "no such tool" } };
+  });
+}
+
+function runImage($: any, args: string) {
+  return $.command.run({
+    command: "image",
+    args,
+    origin: { kind: "composer" },
+    presentation: { isFullscreen: false, columns: 120 },
+  });
+}
+
+function mount($: any, component: any, props: any, viewport?: any) {
+  return $.ui.mount({ plugin: "image-preview", surface: "terminal", component, props, viewport });
+}
+
+describe("image-preview", () => {
+  test("an image path in a user prompt draws an inline Image in the chat row", async ($, on) => {
+    stubWorld(on);
+    on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.text ?? "")] }));
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
+
+    const ui = await mount($, "UserMessage", { text: `look at ${WORK}/pic.png then continue`, origin: { kind: "composer" }, isExpanded: true }, { columns: 120, rows: 40 });
+    expect(await ui.find({ type: "Image" })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: /look at/ })).toBeDefined();
+  });
+
+  test("an image path in an agent reply draws an inline Image in the reply row", async ($, on) => {
+    stubWorld(on);
+    on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.text ?? "")] }));
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
+
+    const ui = await mount($, "AssistantMessage", { text: `done — see ${WORK}/pic.png`, isFirstOfReply: true }, { columns: 120, rows: 40 });
+    expect(await ui.find({ type: "Image" })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: /done — see/ })).toBeDefined();
+  });
+
+  test("a plain terminal draws an ASCII bitmap instead of an Image", async ($, on) => {
+    stubWorld(on, "xterm-256color");
+    on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.text ?? "")] }));
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
+
+    const ui = await mount($, "UserMessage", { text: `look at ${WORK}/pic.png`, origin: { kind: "composer" }, isExpanded: true }, { columns: 120, rows: 40 });
+    expect(await ui.find({ type: "Image" })).not.toBeDefined();
+    // The bitmap's brightest row maps to '@' on the ramp — art, not the label.
+    expect(await ui.find({ type: "Text", text: /[@]/ })).toBeDefined();
+  });
+
+  test("a prompt with no image draws nothing extra (falls through)", async ($, on) => {    stubWorld(on);
+    on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.text ?? "")] }));
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
+
+    const ui = await mount($, "UserMessage", { text: "just words, no picture", origin: { kind: "composer" }, isExpanded: true }, { columns: 120, rows: 40 });
+    expect(await ui.find({ type: "Image" })).not.toBeDefined();
+  });
+
+  test("[Image #N] resolves against the /image gallery", async ($, on) => {
+    stubWorld(on);
+    on("ui.render", (_$: unknown, _e: any) => ({ type: "Text", props: {}, children: [] }));
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
+
+    const r = await runImage($, `${WORK}/photo.jpg`);
+    expect((r as any).text).toMatch(/\[Image #1\]/);
+    expect((mem["image-preview:state"] as any).state.gallery).toEqual([`${WORK}/photo.jpg`]);
+
+    const ui = await mount($, "UserMessage", { text: "show me [Image #1]", origin: { kind: "composer" }, isExpanded: true }, { columns: 120, rows: 40 });
+    expect(await ui.find({ type: "Image" })).toBeDefined();
+  });
+
+  test("/image clear empties the gallery", async ($, on) => {
+    stubWorld(on);
+    on("ui.render", (_$: unknown, _e: any) => ({ type: "Text", props: {}, children: [] }));
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
+
+    await runImage($, `${WORK}/a.png ${WORK}/b.png`);
+    expect((mem["image-preview:state"] as any).state.gallery).toHaveLength(2);
+
+    const r = await runImage($, "clear");
+    expect((r as any).text).toMatch(/cleared/);
+    expect((mem["image-preview:state"] as any).state.gallery).toHaveLength(0);
+  });
+
+  test("AbovePrompt band draws editor thumbnails updated from prompt.edit", async ($, on) => {
+    stubWorld(on);
+    on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.bandText ?? "")] }));
+    on("prompt.fill", (_$: unknown, e: any) => ({ isFilled: true, text: e?.text ?? "", cursor: String(e?.text ?? "").length }));
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
+
+    // Write an image path into the prompt box as the draft (mode replace).
+    await $.prompt.fill({ text: "paste /work/pic.png", mode: "replace", origin: { kind: "plugin", name: "test-filler" } });
+
+    const ui = await mount($, "AbovePrompt", { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 16 } }, { columns: 120, rows: 40 });
+    expect(await ui.find({ type: "Image" })).toBeDefined();
+  });
+});

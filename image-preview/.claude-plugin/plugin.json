@@ -1,0 +1,7 @@
+{
+  "name": "image-preview",
+  "version": "0.1.0",
+  "description": "Preview image paths inline: thumbnails above the prompt editor (1:1, aspect-fill, 4 rows) and in chat rows (aspect-fit, 10 rows). Recognises a real file path ending in a supported image extension, or an [Image #N] token stored by the /image command.",
+  "author": { "name": "ezou" },
+  "types": "./types/index.d.ts"
+}
