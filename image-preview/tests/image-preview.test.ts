@@ -109,6 +109,19 @@ describe("image-preview", () => {
     // The alt degrades to the ASCII bitmap of the same picture (mermaid's
     // asciiFor): the stub BMP's brightest rows map to '@' on the ramp.
     expect(tree).toContain("@");
+    // Aspect-fill, never stretched: the block's cell aspect matches the
+    // picture's pixel aspect through the 16x34px cell (400x300 -> 2.833 c/r).
+    const drawn = JSON.parse(tree);
+    const img = JSON.stringify(drawn).includes('"type":"Image"') ? drawn : null;
+    const findImg = (n: any): any => {
+      if (n?.type === "Image") return n;
+      for (const c of n?.children ?? []) { const f = findImg(c); if (f) return f; }
+      return null;
+    };
+    const node = findImg(drawn);
+    expect(node).toBeDefined();
+    const want = (400 / 300) * (34 / 16); // 2.833 columns per row
+    expect(Math.abs(node.props.columns / node.props.rows - want)).toBeLessThan(0.5);
   });
 
   test("a prompt with no image draws nothing extra (falls through)", async ($, on) => {    stubWorld(on);
@@ -130,6 +143,22 @@ describe("image-preview", () => {
 
     const ui = await mount($, "UserMessage", { text: "show me [Image #1]", origin: { kind: "composer" }, isExpanded: true }, { columns: 120, rows: 40 });
     expect(await ui.find({ type: "Image" })).toBeDefined();
+  });
+
+  test("a submitted prompt clears the editor-band preview", async ($, on) => {
+    stubWorld(on);
+    on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.bandText ?? "")] }));
+    on("prompt.fill", (_$: unknown, e: any) => ({ isFilled: true, text: e?.text ?? "", cursor: String(e?.text ?? "").length }));
+    on("prompt.submit", (_$: unknown, e: any) => ({ text: e?.text ?? "" }));
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
+
+    await $.prompt.fill({ text: "paste /work/pic.png", mode: "replace", origin: { kind: "plugin", name: "test-filler" } });
+    const before = await mount($, "AbovePrompt", { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 16 } }, { columns: 120, rows: 40 });
+    expect(await before.find({ type: "Image" })).toBeDefined();
+
+    await $.prompt.submit({ text: "paste /work/pic.png" });
+    const after = await mount($, "AbovePrompt", { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 16 } }, { columns: 120, rows: 40 });
+    expect(await after.find({ type: "Image" })).not.toBeDefined();
   });
 
   test("/image clear empties the gallery", async ($, on) => {

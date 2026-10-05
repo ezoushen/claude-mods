@@ -270,20 +270,18 @@ async function drawThumb($, absPath, label, maxColumns, mode, C) {
 
 // --- sizing -----------------------------------------------------------------
 
-// Aspect-fit: the picture fits inside maxColumns x maxRows, unchanged aspect.
+// Aspect-fill: the picture covers a block whose cell aspect matches its pixel
+// aspect, so it is never stretched. A block of c x r cells is (c*16)px wide by
+// (r*34)px tall, so undistorted means c/r == (W/H) * 34/16 — i.e. `ratio`
+// columns per row. Thumbnails are height-bound: start from the row cap.
 function fit(W, H, maxColumns, maxRows) {
   if (!W || !H || W <= 0 || H <= 0) return { columns: 1, rows: 1 };
-  // columns/rows == (W/H) * (CELL_H/CELL_W)
-  const ratio = (W / H) * CELL_H_OVER_CELL_W;
-  let columns = Math.max(1, Math.floor(maxColumns));
-  let rows = Math.max(1, Math.round(columns * ratio));
-  if (rows > maxRows) {
-    rows = maxRows;
-    columns = Math.max(1, Math.floor(rows / ratio));
-  }
+  const ratio = (W / H) * CELL_H_OVER_CELL_W; // columns per row
+  let rows = Math.max(1, Math.floor(maxRows));
+  let columns = Math.round(rows * ratio);
   if (columns > maxColumns) {
-    columns = maxColumns;
-    rows = Math.max(1, Math.round(columns * ratio));
+    columns = Math.max(1, Math.floor(maxColumns));
+    rows = Math.max(1, Math.round(columns / ratio));
   }
   return { columns, rows };
 }
@@ -444,6 +442,20 @@ async function bandHook($, e, next) {
 export function register(on) {
   // Live prompt-box editing: recompute the editor-band thumbnails and re-run
   // ui.render so the AbovePrompt band redraws with fresh previews.
+    // The prompt entered: the draft is gone, so the editor-band preview goes
+  // with it. A dropped submit (a hook refused) keeps the box — keep the art.
+  on("prompt.submit", async ($, e, next) => {
+    const r = await next(e);
+    if (r && !r.drop) {
+      await rememberAbove($, "", []);
+      try {
+        await $.ui.invalidate("ui.render");
+      } catch {
+        // no ui.render subscription yet
+      }
+    }
+    return r;
+  });
   on("prompt.edit", bandHook);
   on("prompt.fill", bandHook);
 
