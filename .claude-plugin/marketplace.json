@@ -1,0 +1,21 @@
+{
+  "name": "claude-mods",
+  "owner": {
+    "name": "ezoushen"
+  },
+  "metadata": {
+    "description": "Claude Code mods by ezoushen — plugins whose behavior lives in hooks modules.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "mermaid-pane",
+      "description": "Presents mermaid code blocks as ASCII art or images (mmdc locally, mermaid.ink as fallback) — embedded in replies with a /mermaid pane for the session gallery.",
+      "version": "0.1.0",
+      "source": "./mermaid-pane",
+      "author": {
+        "name": "ezoushen"
+      }
+    }
+  ]
+}

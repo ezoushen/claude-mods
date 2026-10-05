@@ -1,0 +1,12 @@
+# session/tooling state (not part of the marketplace)
+.pi/
+.pi-glla/
+.DS_Store
+*.log
+
+# node
+node_modules/
+package-lock.json
+
+# local render caches
+tmp/
