@@ -47,6 +47,7 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, term = "xterm-gho
   on("fs.read", (_$: unknown, e: { path: string; as?: string }) => {
     // The engine reads an Image's { file, format: "png" } source by name; the
     // bytes answer stays valid PNG for surfaces that want the payload.
+    if (String(e?.path ?? "").endsWith(".bmp")) return { value: { base64: BMP_B64 } };
     if (e?.as === "bytes") return { value: { base64: PNG_B64 } };
     return { value: "" };
   });
@@ -105,6 +106,9 @@ describe("image-preview", () => {
     expect(tree).toContain('"format":"png"');
     expect(tree).toContain(".png");
     expect(await ui.find({ type: "Image" })).toBeDefined();
+    // The alt degrades to the ASCII bitmap of the same picture (mermaid's
+    // asciiFor): the stub BMP's brightest rows map to '@' on the ramp.
+    expect(tree).toContain("@");
   });
 
   test("a prompt with no image draws nothing extra (falls through)", async ($, on) => {    stubWorld(on);
