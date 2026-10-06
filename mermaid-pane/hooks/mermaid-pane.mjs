@@ -85,14 +85,32 @@ async function run($, cmd) {
   return r?.value ?? r ?? {};
 }
 
+// Hook shells don't source rc files, so nvm's node bin dir is often missing
+// from PATH; prepend the newest installed nvm node when probing/installing.
+const NVM_PATH_PRELUDE =
+  'NB=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | tail -1); [ -n "$NB" ] && export PATH="$NB:$PATH"; ';
+
+// Locate a binary: ambient PATH first, then ~/.local/bin (the setup target).
+// Everything env-sensitive stays in $HOME/uname — nothing per-machine hardcoded.
+function whichSh(bin, prelude = "") {
+  return (
+    `${prelude}if command -v ${bin} >/dev/null 2>&1; then command -v ${bin};` +
+    ` elif [ -x "$HOME/.local/bin/${bin}" ]; then echo "$HOME/.local/bin/${bin}"; fi`
+  );
+}
+
+async function probeSh($, sh) {
+  try {
+    const { exitCode, stdout } = await run($, sh);
+    return (exitCode ?? 1) === 0 && stdout?.trim() ? stdout.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 async function probeTool($) {
   if (probedTool !== undefined) return probedTool;
-  try {
-    const { exitCode, stdout } = await run($, "command -v mermaid-ascii || true");
-    probedTool = (exitCode ?? 1) === 0 && stdout?.trim() ? stdout.trim() : null;
-  } catch {
-    probedTool = null;
-  }
+  probedTool = await probeSh($, whichSh("mermaid-ascii"));
   return probedTool;
 }
 
@@ -184,12 +202,7 @@ let probedMmdc; // undefined = not probed this load
 
 async function mmdcPath($) {
   if (probedMmdc !== undefined) return probedMmdc;
-  try {
-    const { exitCode, stdout } = await run($, "command -v mmdc || true");
-    probedMmdc = (exitCode ?? 1) === 0 && stdout?.trim() ? stdout.trim() : null;
-  } catch {
-    probedMmdc = null;
-  }
+  probedMmdc = await probeSh($, whichSh("mmdc", NVM_PATH_PRELUDE));
   return probedMmdc;
 }
 
@@ -216,7 +229,7 @@ async function ensurePng($, code) {
     // -s 2 doubles the pixels; the terminal downsamples the crisp source.
     try {
       const sh =
-        `NB=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | tail -1); [ -n "$NB" ] && export PATH="$NB:$PATH"; command -v node >/dev/null 2>&1 || exit 0; ` +
+        `${NVM_PATH_PRELUDE}command -v node >/dev/null 2>&1 || exit 0; ` +
         `mkdir -p '${PNG_DIR}' && printf '%s' ${shellQuote(code)} > '${PNG_DIR}/${base}.mmd' && ` +
         `P=""; [ -f '${PNG_DIR}/puppeteer.json' ] && P="-p ${PNG_DIR}/puppeteer.json"; ` +
         `[ -f '${PNG_DIR}/puppeteer.json' ] || for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "/Applications/Chromium.app/Contents/MacOS/Chromium" "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"; do [ -x "$c" ] && printf '{"executablePath":"%s"}' "$c" > '${PNG_DIR}/puppeteer.json' && P="-p ${PNG_DIR}/puppeteer.json" && break; done; ` +
@@ -411,36 +424,37 @@ async function renderAssistant($, e, next) {
 // --- optional renderers: availability + one-shot setup -----------------------
 
 // Fresh (non-memoized) probe — setup must see installs made this session.
-async function probeBin($, bin) {
-  try {
-    const { exitCode, stdout } = await run($, `command -v ${bin} || true`);
-    return (exitCode ?? 1) === 0 && stdout?.trim() ? stdout.trim() : null;
-  } catch {
-    return null;
-  }
-}
+const probeFresh = ($, bin, prelude = "") => probeSh($, whichSh(bin, prelude));
 
-// Preferred Python manager first; mermaid-ascii is a Python CLI.
-const ASCII_MANAGERS = [
-  ["uv", "uv tool install mermaid-ascii"],
-  ["pipx", "pipx install mermaid-ascii"],
-  ["pip3", "pip3 install --user mermaid-ascii"],
-];
+// Prebuilt release binaries only — no compilers, no source builds. The
+// platform pair is read from uname at install time (Darwin/Linux, arm64,
+// x86_64, i386); anything else logs how to install manually. Lands in
+// ~/.local/bin, created on demand. curl + tar are the only requirements
+// (curl is already a hard dependency of the image fallback path).
+const ASCII_RELEASE_URL =
+  "https://github.com/AlexanderGrooff/mermaid-ascii/releases/latest/download";
+const ASCII_INSTALL_SH =
+  `set -e; OS=$(uname -s); A=$(uname -m); ` +
+  `case "$OS/$A" in ` +
+  `Darwin/arm64) E=Darwin_arm64 ;; Darwin/x86_64) E=Darwin_x86_64 ;; ` +
+  `Linux/x86_64) E=Linux_x86_64 ;; Linux/aarch64) E=Linux_arm64 ;; ` +
+  `Linux/i?86) E=Linux_i386 ;; ` +
+  `*) echo "no prebuilt mermaid-ascii for $OS/$A — see github.com/AlexanderGrooff/mermaid-ascii/releases" >&2; exit 1 ;; esac; ` +
+  `D=$(mktemp -d); curl -sfL "${ASCII_RELEASE_URL}/mermaid-ascii_$E.tar.gz" | tar -xz -C "$D"; ` +
+  `mkdir -p "$HOME/.local/bin"; cp "$D/mermaid-ascii" "$HOME/.local/bin/mermaid-ascii" && chmod +x "$HOME/.local/bin/mermaid-ascii"; rm -rf "$D"; ` +
+  `echo "installed $HOME/.local/bin/mermaid-ascii ($E)"`;
 
-async function installSh($, key) {
-  if (key === "ascii") {
-    for (const [, cmd] of ASCII_MANAGERS) {
-      if (await probeBin($, cmd.split(" ")[0])) return cmd;
-    }
-    return null; // no Python manager found
-  }
-  // mermaid-cli: npm -g, with the nvm PATH prelude (the hook's sh may not source nvm).
-  if (!(await probeBin($, "npm"))) return null;
-  return (
-    `NB=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | tail -1); [ -n "$NB" ] && export PATH="$NB:$PATH"; ` +
-    `npm install -g @mermaid-cli`
-  );
-}
+// mermaid-cli ships prebuilt on npm; puppeteer fetches a prebuilt Chromium on
+// first render. The spec is pinned to the Node major that will run it
+// (12.x needs Node ≥ 22.13, 11.x ≥ 18.19) so an install on an older Node
+// cannot die on engines. npm resolves through the nvm prelude.
+const MMDC_INSTALL_SH =
+  `${NVM_PATH_PRELUDE}command -v npm >/dev/null 2>&1 || { echo "npm not found — install Node first" >&2; exit 1; }; ` +
+  `M=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0); ` +
+  `S=@mermaid-js/mermaid-cli@latest; ` +
+  `[ "$M" -ge 23 ] || S=@mermaid-js/mermaid-cli@11; ` +
+  `[ "$M" -ge 19 ] || S=@mermaid-js/mermaid-cli@10.9.1; ` +
+  `npm install -g "$S"`;
 
 // Installs run detached (nohup) so the hook never blocks on npm/pip; the log
 // lands in PNG_DIR and a re-run of /mermaid setup reports progress.
@@ -498,20 +512,20 @@ export function register(on) {
       if (/^setup/.test(arg)) {
         const lines = [];
         const starting = [];
-        const ascii = await probeBin($, "mermaid-ascii");
-        const mmdc = await probeBin($, "mmdc");
+        const ascii = await probeFresh($, "mermaid-ascii");
+        const mmdc = await probeFresh($, "mmdc", NVM_PATH_PRELUDE);
         if (ascii) lines.push("✓ mermaid-ascii (better ASCII art)");
         if (mmdc) lines.push("✓ mermaid-cli (offline PNG rendering)");
-        for (const [key, have, label, need] of [
-          ["ascii", ascii, "mermaid-ascii", "a Python manager (uv, pipx or pip3)"],
-          ["mmdc", mmdc, "mermaid-cli (mmdc)", "Node + npm"],
+        for (const [key, have, label] of [
+          ["ascii", ascii, "mermaid-ascii"],
+          ["mmdc", mmdc, "mermaid-cli (mmdc)"],
         ]) {
           if (have) continue;
-          const sh = await installSh($, key);
-          if (!sh) {
-            lines.push(`✗ ${label} — install it manually (needs ${need})`);
+          if (key === "mmdc" && !(await probeFresh($, "npm", NVM_PATH_PRELUDE))) {
+            lines.push(`✗ ${label} — install it manually (needs Node + npm)`);
             continue;
           }
+          const sh = key === "ascii" ? ASCII_INSTALL_SH : MMDC_INSTALL_SH;
           if (await startInstall($, key, sh)) {
             starting.push(label);
             lines.push(`… ${label} — installing in the background`);
@@ -521,7 +535,11 @@ export function register(on) {
         }
         let text;
         if (starting.length) {
-          text = `Installing ${starting.join(", ")} in the background (log: ${PNG_DIR}/setup.log).\nRe-run /mermaid setup to check; new sessions pick renderers up automatically.`;
+          const blocked = lines.filter((l) => l.startsWith("✗"));
+          text =
+            `Installing ${starting.join(", ")} in the background (log: ${PNG_DIR}/setup.log).` +
+            (blocked.length ? `\n${blocked.join("\n")}` : "") +
+            `\nRe-run /mermaid setup to check; new sessions pick renderers up automatically.`;
         } else if (lines.every((l) => l.startsWith("✓"))) {
           text = "Everything is installed — ascii art via mermaid-ascii, images via mermaid-cli (fallback: curl + sips, built in).";
         } else {
@@ -542,8 +560,8 @@ export function register(on) {
         };
       }
       const mode = await getMode($);
-      const ascii = await probeBin($, "mermaid-ascii");
-      const mmdc = await probeBin($, "mmdc");
+      const ascii = await probeFresh($, "mermaid-ascii");
+      const mmdc = await probeFresh($, "mmdc", NVM_PATH_PRELUDE);
       let text = `${mode} mode — /mermaid ${mode === "image" ? "ascii" : "image"} to switch.`;
       if (!ascii || !mmdc) {
         const parts = [];

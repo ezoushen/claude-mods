@@ -4,7 +4,7 @@ Claude Code mods by [ezoushen](https://github.com/ezoushen) — plugins whose be
 
 | Mod | Requires | Install |
 | --- | --- | --- |
-| [mermaid-pane](mermaid-pane/) | Claude Code ≥ 2.1.287; renderers optional (`/mermaid setup` installs them); image mode needs a graphics terminal (kitty/iTerm2/WezTerm/Ghostty) | `/plugin marketplace add ezoushen/claude-mods` then `/plugin install mermaid-pane@claude-mods` |
+| [mermaid-pane](mermaid-pane/) | Claude Code ≥ 2.1.287; renderers optional (`/mermaid setup` installs prebuilt binaries); image pixels draw in kitty/Ghostty (elsewhere it degrades to ASCII art) | `/plugin marketplace add ezoushen/claude-mods` then `/plugin install mermaid-pane@claude-mods` |
 | [image-preview](image-preview/) | Claude Code ≥ 2.1.287; works on any terminal (draws the filename as alt-text on non-graphic ones) | `/plugin marketplace add ezoushen/claude-mods` then `/plugin install image-preview@claude-mods` |
 
 ## Mods

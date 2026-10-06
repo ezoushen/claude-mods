@@ -1,6 +1,6 @@
 {
   "name": "mermaid-pane",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Renders mermaid code blocks inline as ASCII art or images; /mermaid switches modes, /mermaid setup installs renderers.",
   "author": { "name": "ezou" },
   "types": "./types/index.d.ts"

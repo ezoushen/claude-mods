@@ -135,8 +135,8 @@ describe("mermaid-pane", () => {
     expect(await ui.find({ type: "Text", text: /```mermaid/ })).not.toBeDefined();
   });
 
-  test("/mermaid setup starts installs for missing renderers and skips present ones", async ($, on) => {
-    stubWorld(on, { present: ["uv", "npm"] }); // renderers missing, managers present
+  test("/mermaid setup starts prebuilt installs for missing renderers and skips present ones", async ($, on) => {
+    stubWorld(on, { present: ["npm"] }); // renderers missing, npm present
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
     const call = (args: string) =>
       $.command.run({
@@ -149,8 +149,28 @@ describe("mermaid-pane", () => {
     const out = (await call("setup")).text;
     expect(out).toMatch(/installing mermaid-ascii, mermaid-cli \(mmdc\) in the background/i);
     expect(setupRuns.length).toBe(2);
-    expect(setupRuns[0]).toContain("uv tool install mermaid-ascii");
-    expect(setupRuns[1]).toContain("npm install -g @mermaid-cli");
+    // mermaid-ascii: prebuilt release download, platform matched via uname
+    expect(setupRuns[0]).toContain("releases/latest/download/mermaid-ascii_");
+    expect(setupRuns[0]).toContain("uname -s");
+    expect(setupRuns[0]).toContain("$HOME/.local/bin/mermaid-ascii");
+    // mermaid-cli: correct scoped npm package, pinned to the Node major found
+    expect(setupRuns[1]).toContain("@mermaid-js/mermaid-cli");
+    expect(setupRuns[1]).not.toContain("@mermaid-cli@latest");
+    expect(setupRuns[1]).toContain("npm install -g");
+  });
+
+  test("/mermaid setup reports missing npm instead of starting a doomed mmdc install", async ($, on) => {
+    stubWorld(on); // nothing present at all
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+    const out = await $.command.run({
+      command: "mermaid",
+      args: "setup",
+      origin: { kind: "composer" },
+      presentation: { isFullscreen: false, columns: 120 },
+    });
+    expect(out.text).toMatch(/mermaid-cli \(mmdc\) — install it manually \(needs Node \+ npm\)/);
+    expect(setupRuns.length).toBe(1); // only the mermaid-ascii download starts
+    expect(setupRuns[0]).toContain("releases/latest/download/mermaid-ascii_");
   });
 
   test("/mermaid setup stays quiet when everything is installed", async ($, on) => {

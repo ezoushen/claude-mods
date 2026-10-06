@@ -11,7 +11,7 @@
     {
       "name": "mermaid-pane",
       "description": "Renders mermaid code blocks inline as ASCII art or images; /mermaid switches modes, /mermaid setup installs renderers.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "source": "./mermaid-pane",
       "author": {
         "name": "ezoushen"
