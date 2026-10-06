@@ -170,13 +170,19 @@ async function collectThumbs($, text, C) {
   return nodes;
 }
 
+// Some render passes read state before it is available (the raw answer comes
+// back { version } with no value), which would make gallery thumbnails flicker
+// out on redraws. Remember the last non-empty gallery and fall back to it.
+let lastGallery = [];
+
 async function loadGallery($) {
   try {
     const { value } = await $.state.get(NS);
     const gallery = value?.state?.gallery;
-    return Array.isArray(gallery) ? gallery : [];
+    if (Array.isArray(gallery) && gallery.length) lastGallery = gallery;
+    return Array.isArray(gallery) && gallery.length ? gallery : lastGallery;
   } catch {
-    return [];
+    return lastGallery;
   }
 }
 
