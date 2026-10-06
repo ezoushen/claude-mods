@@ -174,9 +174,23 @@ async function loadGallery($) {
   }
 }
 
+// Opt-in and capability gate in one: CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1 is
+// the same switch the engine's own kitty-graphics gate honors — set it where
+// the terminal paints (the README shows a herdr-scoped zshrc guard). Unset,
+// the mod is a complete no-op: no state reads, no sips, no scans.
+async function paints($) {
+  try {
+    return (await $.env.get("CLAUDE_CODE_FORCE_TERMINAL_IMAGES")) === "1";
+  } catch {
+    return false;
+  }
+}
+
 // Shared render body for both row types: the engine's own block, untouched —
 // identical to a no-image row — with the thumbnails appended below it.
 async function renderRow($, e, next) {
+  if (!(await paints($))) return next(e);
+
   const props = e?.props ?? {};
   const text = props.text;
   if (typeof text !== "string") return next(e);

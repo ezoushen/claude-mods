@@ -8,7 +8,7 @@ const WORK = "/work";
 
 // Build a world where any `*.png`/`*.jpg` path is a real file and `sips`
 // converts it to 400x300.
-function stubWorld(on: (event: string, hook: AnyHook) => void) {
+function stubWorld(on: (event: string, hook: AnyHook) => void, envFlag = "1") {
   for (const k of Object.keys(mem)) delete mem[k]; // fresh state per test
   on("session.start", () => ({ cwd: WORK }));
   on("session.messages", () => ({ value: [] }));
@@ -28,6 +28,13 @@ function stubWorld(on: (event: string, hook: AnyHook) => void) {
 
   on("command.register", () => ({ value: { command: "image" } }));
   on("ui.invalidate", () => ({ value: {} }));
+
+  // Rendering is opted in via the env flag (the same one the engine's
+  // kitty-graphics gate honors); the tests run with it on.
+  on("env.get", (_$: unknown, e: { name: string }) => {
+    if (e?.name === "CLAUDE_CODE_FORCE_TERMINAL_IMAGES") return { value: envFlag };
+    return { value: undefined };
+  });
 
   on("process.run", (_$: unknown, cmd: unknown) => {
     const s = JSON.stringify(cmd);
@@ -112,6 +119,15 @@ describe("image-preview", () => {
     const tree = JSON.stringify(await ui.drawn());
     expect(tree).toContain('"file":"/tmp/image-preview/78ek45.png"');
     expect(tree).toContain("see /work/pic.png?w=100#top");
+  });
+
+  test("without the opt-in flag the mod is a no-op (zero overhead)", async ($, on) => {
+    stubWorld(on, ""); // flag unset — the mod must be a complete no-op
+    on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.text ?? "")] }));
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
+
+    const ui = await mount($, "UserMessage", { text: `look at ${WORK}/pic.png`, origin: { kind: "composer" }, isExpanded: true }, { columns: 120, rows: 40 });
+    expect(await ui.find({ type: "Image" })).not.toBeDefined();
   });
 
   test("a prompt with no image draws nothing extra (falls through)", async ($, on) => {

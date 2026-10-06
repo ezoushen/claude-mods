@@ -17,6 +17,12 @@ Every thumbnail is an `Image` element sourcing a real PNG file
 - **kitty / Ghostty**: the engine paints actual pixels.
 - **Other terminals**: the engine draws the `alt` — the picture's file name.
 
+## Opt-in: the mod renders only when the flag is set
+
+The same flag is the mod's switch. Unset, the mod is a complete no-op — no
+state reads, no sips calls, no scans; rows render exactly as they would
+without it. Set it (per the gate section below) and thumbnails render.
+
 ## Terminal gate (important inside multiplexers)
 
 Claude Code paints `Image` elements only when the kitty-graphics capability
