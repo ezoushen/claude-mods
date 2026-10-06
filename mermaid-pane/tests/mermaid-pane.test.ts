@@ -2,10 +2,12 @@ import { describe, expect, test } from "claude-code/testing";
 
 const REPLY = "intro line\n```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```";
 const REPLY_EDGES = "```mermaid\nflowchart LR\n  P[Phone] --> W[WiFi Router] --> N[Internet]\n```";
+const SECRET = "SECRET_DIAGRAM_PAYLOAD_XYZ";
+const REPLY_SECRET = "```mermaid\nflowchart LR\n  A[" + SECRET + "] --> B[End]\n```";
 
 // In-memory $.state backing (mode is the session value).
 const mem: Record<string, unknown> = {};
-// In-memory $.store backing (mode persists here, durable).
+// In-memory $.store backing (mode + external persist here, durable).
 const store: Record<string, unknown> = {};
 const stateKey = (e: { plugin: string; key: string }) => `${e.plugin}:${e.key}`;
 const defaults: Record<string, unknown> = {
@@ -21,11 +23,31 @@ const ROW = {
 type AnyHook = (...args: any[]) => unknown;
 // Commands the setup path detached (asserted per test).
 let setupRuns: string[] = [];
-function stubWorld(
-  on: (event: string, hook: AnyHook) => void,
-  opts: { png?: boolean; present?: string[] } = {}
-) {
+// Every process.run payload, for asserting zero mermaid.ink traffic.
+let processRuns: string[] = [];
+
+type StubOpts = {
+  png?: boolean;
+  present?: string[];
+  /** Simulate local mmdc success (sips metadata without mermaid.ink). */
+  localPng?: boolean;
+  /** Local mmdc present but exits nonzero. */
+  localFail?: boolean;
+  /** Local mmdc present but returns exit 124 (timeout). */
+  localTimeout?: boolean;
+  /** Local mmdc present, exit 0, but no pixel metadata. */
+  localBadMeta?: boolean;
+  /** Remote curl/sips fails even when external is on. */
+  remoteFail?: boolean;
+};
+
+function isInkRequest(s: string) {
+  return s.includes("mermaid.ink");
+}
+
+function stubWorld(on: (event: string, hook: AnyHook) => void, opts: StubOpts = {}) {
   setupRuns = [];
+  processRuns = [];
   on("session.start", () => ({ cwd: "/work" }));
   on("session.messages", () => ({ value: [] }));
   on("state.get", (_$: unknown, e: { plugin: string; key: string }) => {
@@ -46,20 +68,88 @@ function stubWorld(
   on("ui.invalidate", () => ({ value: {} }));
   on("process.run", (_$: unknown, cmd: unknown) => {
     const s = JSON.stringify(cmd);
+    processRuns.push(s);
     if (s.includes("nohup")) {
       setupRuns.push(s);
       return { value: { exitCode: 0, stdout: "started" } };
+    }
+    // which-style probes (command -v …)
+    const which = /command -v ([a-z0-9-]+)/.exec(s);
+    if (which && which[1] && !s.includes("mmdc") && !s.includes("timeout") && !s.includes("printf")) {
+      const bin = which[1];
+      const present = opts.present ?? [];
+      return {
+        value: {
+          exitCode: present.includes(bin) ? 0 : 1,
+          stdout: present.includes(bin) ? `/usr/bin/${bin}` : "",
+        },
+      };
+    }
+    // mmdc / local render path (probe or render). Detect probe vs render carefully.
+    if (s.includes("mmdc") && !s.includes("-i ") && !s.includes("timeout")) {
+      // whichSh("mmdc") probe
+      const present = (opts.present ?? []).includes("mmdc") || opts.localPng || opts.localFail || opts.localTimeout || opts.localBadMeta;
+      return {
+        value: {
+          exitCode: present ? 0 : 1,
+          stdout: present ? "/usr/bin/mmdc" : "",
+        },
+      };
+    }
+    if (s.includes("mermaid.ink") || (s.includes("curl") && s.includes("mermaid"))) {
+      if (opts.remoteFail) return { value: { exitCode: 1, stdout: "", stderr: "fail" } };
+      if ((opts.png || store["external"] === "on") && !opts.remoteFail) {
+        // SVG sizing or image fetch — image path still needs sips metadata afterward
+        if (s.includes("sips")) {
+          return { value: { exitCode: 0, stdout: "pixelWidth: 876\npixelHeight: 196" } };
+        }
+        return { value: { exitCode: 0, stdout: 'viewBox="0 0 800 200" max-width: 800px' } };
+      }
+      return { value: { exitCode: 1, stdout: "", stderr: "" } };
+    }
+    if (opts.localPng && s.includes("sips") && (s.includes("mmdc") || s.includes(".png"))) {
+      return { value: { exitCode: 0, stdout: "pixelWidth: 876\npixelHeight: 196" } };
+    }
+    if (opts.localTimeout && s.includes("mmdc")) {
+      return { value: { exitCode: 124, stdout: "", stderr: "" } };
+    }
+    if (opts.localFail && s.includes("mmdc")) {
+      return { value: { exitCode: 1, stdout: "", stderr: "boom" } };
+    }
+    if (opts.localBadMeta && s.includes("mmdc")) {
+      return { value: { exitCode: 0, stdout: "no-dimensions-here" } };
     }
     if (opts.png && s.includes("sips")) {
       return { value: { exitCode: 0, stdout: "pixelWidth: 876\npixelHeight: 196" } };
     }
     if (opts.png && s.includes("curl")) return { value: { exitCode: 0, stdout: "" } };
+    // Generic which for mermaid-ascii / npm / timeout
     const m = /command -v ([a-z0-9-]+)/.exec(s);
-    if (m && m[1])
+    if (m && m[1]) {
+      const present = opts.present ?? [];
+      // Always pretend timeout exists so the local bound path is exercised when mmdc runs
+      if (m[1] === "timeout") return { value: { exitCode: 0, stdout: "/usr/bin/timeout" } };
       return {
-        value: { exitCode: (opts.present ?? []).includes(m[1]) ? 0 : 1, stdout: (opts.present ?? []).includes(m[1]) ? `/usr/bin/${m[1]}` : "" },
+        value: {
+          exitCode: present.includes(m[1]) ? 0 : 1,
+          stdout: present.includes(m[1]) ? `/usr/bin/${m[1]}` : "",
+        },
       };
-    return { value: { exitCode: 1, stdout: "", stderr: "" } }; // no mermaid-ascii/png in tests
+    }
+    return { value: { exitCode: 1, stdout: "", stderr: "" } };
+  });
+}
+
+function inkRequestCount() {
+  return processRuns.filter(isInkRequest).length;
+}
+
+function callMermaid($: any, args: string) {
+  return $.command.run({
+    command: "mermaid",
+    args,
+    origin: { kind: "composer" },
+    presentation: { isFullscreen: false, columns: 120 },
   });
 }
 
@@ -77,29 +167,31 @@ async function mountRow($: any, text: string) {
   return $.ui.mount({ plugin: "mermaid-pane", ...ROW, props: { text, isFirstOfReply: true } });
 }
 
+function resetMem() {
+  for (const k of Object.keys(mem)) delete mem[k];
+  for (const k of Object.keys(store)) delete store[k];
+}
+
 describe("mermaid-pane", () => {
   test("/mermaid sets the mode in state and store", async ($, on) => {
+    resetMem();
     stubWorld(on);
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
-    const call = (args: string) =>
-      $.command.run({
-        command: "mermaid",
-        args,
-        origin: { kind: "composer" },
-        presentation: { isFullscreen: false, columns: 120 },
-      });
 
-    expect((await call("image")).text).toMatch(/image mode/i);
+    expect((await callMermaid($, "image")).text).toMatch(/image mode/i);
     expect(mem["mermaid-pane:mode"]).toBe("image");
     expect(store["mode"]).toBe("image");
-    expect((await call("ascii")).text).toMatch(/ascii mode/i);
+    expect((await callMermaid($, "ascii")).text).toMatch(/ascii mode/i);
     expect(mem["mermaid-pane:mode"]).toBe("ascii");
     expect(store["mode"]).toBe("ascii");
-    // bare /mermaid reports the current mode
-    expect((await call("")).text).toMatch(/ascii mode/);
+    // bare /mermaid reports the current mode and that external defaults OFF
+    const bare = (await callMermaid($, "")).text;
+    expect(bare).toMatch(/ascii mode/);
+    expect(bare).toMatch(/external OFF/i);
   });
 
   test("ascii mode rewrites each mermaid fence into uncut edge art", async ($, on) => {
+    resetMem();
     echoRow(on);
     stubWorld(on); // no mermaid-ascii → built-in edge art
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
@@ -110,9 +202,11 @@ describe("mermaid-pane", () => {
     expect(await ui.find({ type: "Text", text: /W\[WiFi Router\] ──▶ N\[Internet\]/ })).toBeDefined();
     // the source fence is gone — rewritten in place
     expect(await ui.find({ type: "Text", text: /```mermaid/ })).not.toBeDefined();
+    expect(inkRequestCount()).toBe(0);
   });
 
   test("rows without mermaid blocks pass through untouched", async ($, on) => {
+    resetMem();
     echoRow(on);
     stubWorld(on);
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
@@ -121,32 +215,160 @@ describe("mermaid-pane", () => {
     expect(await ui.find({ type: "Text", text: /just a plain answer/ })).toBeDefined();
   });
 
-  test("image mode embeds the chart image in the response row", async ($, on) => {
+  test("saved image mode does not enable external; missing mmdc makes zero ink requests", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on);
+    // Upgrade path: prior install had image mode saved, never opted into external
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY_SECRET);
+    expect(await ui.find({ type: "Image" })).not.toBeDefined();
+    // ASCII art may show node labels; the diagnostic parenthesis must not leak source/URLs
+    const diagNode = await ui.find({ type: "Text", text: /Remote mermaid\.ink is off/ });
+    expect(diagNode).toBeDefined();
+    const full = String((diagNode as any)?.text ?? (diagNode as any)?.children?.[0] ?? "");
+    const diagOnly = full.includes("(") ? full.slice(full.lastIndexOf("(")) : full;
+    expect(diagOnly).not.toMatch(new RegExp(SECRET));
+    expect(diagOnly).not.toMatch(/mermaid\.ink\/(img|svg)/);
+    expect(inkRequestCount()).toBe(0);
+    expect(store["external"]).not.toBe("on");
+    for (const s of processRuns) {
+      expect(s).not.toMatch(/mermaid\.ink/);
+    }
+  });
+
+  test("local mmdc nonzero exit: zero external requests when OFF", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localFail: true, present: ["mmdc"] });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+    const ui = await mountRow($, REPLY);
+    expect(await ui.find({ type: "Image" })).not.toBeDefined();
+    expect(inkRequestCount()).toBe(0);
+    expect(await ui.find({ type: "Text", text: /Local PNG render failed/ })).toBeDefined();
+  });
+
+  test("local mmdc timeout: zero external requests when OFF", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localTimeout: true, present: ["mmdc"] });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+    const ui = await mountRow($, REPLY);
+    expect(await ui.find({ type: "Image" })).not.toBeDefined();
+    expect(inkRequestCount()).toBe(0);
+    expect(await ui.find({ type: "Text", text: /timed out/ })).toBeDefined();
+  });
+
+  test("local mmdc bad PNG metadata: zero external requests when OFF", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localBadMeta: true, present: ["mmdc"] });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+    const ui = await mountRow($, REPLY);
+    expect(await ui.find({ type: "Image" })).not.toBeDefined();
+    expect(inkRequestCount()).toBe(0);
+    expect(await ui.find({ type: "Text", text: /bad image metadata/ })).toBeDefined();
+  });
+
+  test("successful local PNG: zero external requests regardless of external setting", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localPng: true, present: ["mmdc"] });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    store["external"] = "on"; // even when opted in, local success must stay offline
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY);
+    expect(await ui.find({ type: "Text", text: /intro line/ })).toBeDefined();
+    expect(await ui.find({ type: "Image" })).toBeDefined();
+    expect(inkRequestCount()).toBe(0);
+  });
+
+  test("explicit opt-in enables mermaid.ink fallback", async ($, on) => {
+    resetMem();
     echoRow(on);
     stubWorld(on, { png: true });
     mem["mermaid-pane:mode"] = "image";
     store["mode"] = "image";
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
 
+    const opt = await callMermaid($, "external on");
+    expect(opt.text).toMatch(/External rendering ON/i);
+    expect(opt.text).toMatch(/full diagram source/i);
+    expect(opt.text).toMatch(/persists/i);
+    expect(store["external"]).toBe("on");
+
+    processRuns = [];
     const ui = await mountRow($, REPLY);
-    // intro text and the image element, no raw fence anywhere
-    expect(await ui.find({ type: "Text", text: /intro line/ })).toBeDefined();
     expect(await ui.find({ type: "Image" })).toBeDefined();
-    expect(await ui.find({ type: "Text", text: /```mermaid/ })).not.toBeDefined();
+    expect(inkRequestCount()).toBeGreaterThan(0);
+  });
+
+  test("remote failure with external ON degrades safely without leaking source in diagnostics", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { remoteFail: true });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    store["external"] = "on";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+    const ui = await mountRow($, REPLY_SECRET);
+    expect(await ui.find({ type: "Image" })).not.toBeDefined();
+    const diagNode = await ui.find({ type: "Text", text: /Remote PNG unavailable|ASCII fallback/ });
+    expect(diagNode).toBeDefined();
+    const full = String((diagNode as any)?.text ?? (diagNode as any)?.children?.[0] ?? "");
+    const diagOnly = full.includes("(") ? full.slice(full.lastIndexOf("(")) : full;
+    expect(diagOnly).not.toMatch(new RegExp(SECRET));
+    expect(diagOnly).not.toMatch(/mermaid\.ink\/(img|svg)/);
+  });
+
+  test("revocation blocks subsequent image/SVG requests after reload", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { png: true });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    store["external"] = "on";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const off = await callMermaid($, "external off");
+    expect(off.text).toMatch(/External rendering OFF/i);
+    expect(store["external"]).toBe("off");
+
+    processRuns = [];
+    const ui = await mountRow($, REPLY);
+    expect(await ui.find({ type: "Image" })).not.toBeDefined();
+    expect(inkRequestCount()).toBe(0);
+  });
+
+  test("ASCII stays local; diagnostics contain no source/payload", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on);
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+    await mountRow($, REPLY_SECRET);
+    expect(inkRequestCount()).toBe(0);
+    for (const s of processRuns) {
+      expect(s).not.toMatch(/mermaid\.ink/);
+    }
   });
 
   test("/mermaid setup starts prebuilt installs for missing renderers and skips present ones", async ($, on) => {
+    resetMem();
     stubWorld(on, { present: ["npm"] }); // renderers missing, npm present
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
-    const call = (args: string) =>
-      $.command.run({
-        command: "mermaid",
-        args,
-        origin: { kind: "composer" },
-        presentation: { isFullscreen: false, columns: 120 },
-      });
 
-    const out = (await call("setup")).text;
+    const out = (await callMermaid($, "setup")).text;
     expect(out).toMatch(/installing mermaid-ascii, mermaid-cli \(mmdc\) in the background/i);
     expect(setupRuns.length).toBe(2);
     // mermaid-ascii: prebuilt release download, platform matched via uname
@@ -157,45 +379,36 @@ describe("mermaid-pane", () => {
     expect(setupRuns[1]).toContain("@mermaid-js/mermaid-cli");
     expect(setupRuns[1]).not.toContain("@mermaid-cli@latest");
     expect(setupRuns[1]).toContain("npm install -g");
+    expect(out).toMatch(/external on/i);
   });
 
   test("/mermaid setup reports missing npm instead of starting a doomed mmdc install", async ($, on) => {
+    resetMem();
     stubWorld(on); // nothing present at all
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
-    const out = await $.command.run({
-      command: "mermaid",
-      args: "setup",
-      origin: { kind: "composer" },
-      presentation: { isFullscreen: false, columns: 120 },
-    });
+    const out = await callMermaid($, "setup");
     expect(out.text).toMatch(/mermaid-cli \(mmdc\) — install it manually \(needs Node \+ npm\)/);
     expect(setupRuns.length).toBe(1); // only the mermaid-ascii download starts
     expect(setupRuns[0]).toContain("releases/latest/download/mermaid-ascii_");
   });
 
   test("/mermaid setup stays quiet when everything is installed", async ($, on) => {
+    resetMem();
     stubWorld(on, { present: ["mermaid-ascii", "mmdc"] });
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
-    const out = await $.command.run({
-      command: "mermaid",
-      args: "setup",
-      origin: { kind: "composer" },
-      presentation: { isFullscreen: false, columns: 120 },
-    });
+    const out = await callMermaid($, "setup");
     expect(out.text).toMatch(/everything is installed/i);
+    expect(out.text).toMatch(/opt-in/i);
     expect(setupRuns.length).toBe(0);
   });
 
   test("bare /mermaid shows renderer status when renderers are missing", async ($, on) => {
+    resetMem();
     stubWorld(on); // nothing present
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
-    const out = await $.command.run({
-      command: "mermaid",
-      args: "",
-      origin: { kind: "composer" },
-      presentation: { isFullscreen: false, columns: 120 },
-    });
-    expect(out.text).toMatch(/mode — \/mermaid (ascii|image) to switch\./);
+    const out = await callMermaid($, "");
+    expect(out.text).toMatch(/mode — external OFF — \/mermaid (ascii|image) to switch\./);
     expect(out.text).toMatch(/renderers: mermaid-ascii ✗ · mermaid-cli ✗ — \/mermaid setup/);
+    expect(out.text).toMatch(/remote: OFF/);
   });
 });

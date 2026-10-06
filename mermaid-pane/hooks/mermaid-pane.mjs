@@ -8,13 +8,19 @@
 //   image — replies keep their source; each chart draws as a real diagram
 //           PNG, degrading to art where the terminal cannot draw images
 //
+// External rendering (mermaid.ink) is OFF by default — image mode alone is
+// not consent. Opt in with /mermaid external on (persists in $.store). Local
+// mmdc is preferred; on miss/fail/timeout with external OFF, fail closed to
+// ASCII with a short actionable diagnostic (never logs diagram source or
+// encoded URLs).
+//
 // No-cut strategy (art): tiered mermaid-ascii spacing → built-in edge-list
 // art → the source itself; every Text draws with wrap:'wrap', lines wrap,
-// never clip. PNG path: mermaid.ink JPEG → sips → PNG file, decoded by the
-// terminal itself (no pixel crosses $).
+// never clip. PNG path: local mmdc → (opt-in) mermaid.ink → sips → PNG.
 
 const MODE = { plugin: "mermaid-pane", key: "mode" }; // read while drawing: a set redraws the drawer
 const PNG_DIR = "/tmp/mermaid-pane";
+const LOCAL_RENDER_SECS = 45; // bound local mmdc so a hung Chromium cannot stall redraws
 
 // Module-level memos: survive redraws, reset on hot reload (fine for caches).
 const artCache = new Map(); // `${budget}|${code}` -> art string
@@ -22,6 +28,7 @@ const pngCache = new Map(); // base -> { file, w, h } | null
 const pngFailedAt = new Map(); // base -> ms of the last failed fetch (retry window)
 let pngsDirty = false; // a PNG was produced after some row may have drawn without it
 let probedTool; // undefined = not probed this load
+let lastPngDiag = null; // last safe diagnostic for /mermaid status (no source/URLs)
 
 // --- tiny utils (sandbox: no Node, no btoa) ---------------------------------
 
@@ -58,6 +65,7 @@ function shellQuote(s) {
 }
 
 let modeMemo; // undefined = not loaded this load; render path must stay sync-fast
+let externalMemo; // undefined = not loaded; "on" | "off"
 
 async function getMode($) {
   if (modeMemo === undefined) {
@@ -78,6 +86,34 @@ async function getMode($) {
     }
   }
   return modeMemo;
+}
+
+// External mermaid.ink is opt-in and durable. Default OFF — a saved image mode
+// never implies consent. Check immediately before every network send.
+async function getExternalAllowed($) {
+  if (externalMemo === undefined) {
+    try {
+      const remembered = await $.store.get("external");
+      externalMemo = remembered === "on" ? "on" : "off";
+    } catch {
+      externalMemo = "off";
+    }
+  }
+  return externalMemo === "on";
+}
+
+function clearImageCaches() {
+  pngCache.clear();
+  svgCache.clear();
+  pngFailedAt.clear();
+  pngsDirty = false;
+  lastPngDiag = null;
+}
+
+async function setExternalAllowed($, allowed) {
+  externalMemo = allowed ? "on" : "off";
+  clearImageCaches(); // revocation/opt-in must affect queued retries and redraws
+  await $.store.set("external", externalMemo);
 }
 
 async function run($, cmd) {
@@ -196,7 +232,7 @@ function edgeArt(code) {
   return lines.length ? lines.join("\n") : null;
 }
 
-// --- image mode: local mmdc render (no network) → mermaid.ink fallback ------
+// --- image mode: local mmdc render (no network) → opt-in mermaid.ink ------
 
 let probedMmdc; // undefined = not probed this load
 
@@ -204,6 +240,27 @@ async function mmdcPath($) {
   if (probedMmdc !== undefined) return probedMmdc;
   probedMmdc = await probeSh($, whichSh("mmdc", NVM_PATH_PRELUDE));
   return probedMmdc;
+}
+
+// Safe, source-free reason strings for the user. Never include diagram text,
+// encoded payloads, mermaid.ink URLs, or raw shell commands that embed them.
+function diagLocal(kind) {
+  const remoteHint =
+    "Remote mermaid.ink is off — /mermaid external on to allow (sends full diagram source; persists).";
+  switch (kind) {
+    case "missing":
+      return `Local PNG unavailable (mermaid-cli not found). ASCII fallback. ${remoteHint}`;
+    case "failed":
+      return `Local PNG render failed. ASCII fallback. ${remoteHint}`;
+    case "timeout":
+      return `Local PNG render timed out. ASCII fallback. ${remoteHint}`;
+    case "meta":
+      return `Local PNG unreadable (bad image metadata). ASCII fallback. ${remoteHint}`;
+    case "remote-failed":
+      return "Remote PNG unavailable. ASCII fallback. /mermaid setup installs local mermaid-cli.";
+    default:
+      return `Local PNG unavailable. ASCII fallback. ${remoteHint}`;
+  }
 }
 
 async function ensurePng($, code) {
@@ -222,54 +279,88 @@ async function ensurePng($, code) {
   const failedAt = pngFailedAt.get(base);
   if (now && failedAt !== undefined && now - failedAt < 60000) return null;
   let result = null;
+  let failKind = "failed";
   const png = `${PNG_DIR}/${base}.png`;
   const mmdc = await mmdcPath($);
-  if (mmdc) {
+  if (!mmdc) {
+    failKind = "missing";
+  } else {
     // Tier 0: local render via mermaid-cli + the system browser — no network.
     // -s 2 doubles the pixels; the terminal downsamples the crisp source.
+    // Bound duration so a hung Chromium cannot stall the render hook.
     try {
       const sh =
         `${NVM_PATH_PRELUDE}command -v node >/dev/null 2>&1 || exit 0; ` +
         `mkdir -p '${PNG_DIR}' && printf '%s' ${shellQuote(code)} > '${PNG_DIR}/${base}.mmd' && ` +
         `P=""; [ -f '${PNG_DIR}/puppeteer.json' ] && P="-p ${PNG_DIR}/puppeteer.json"; ` +
         `[ -f '${PNG_DIR}/puppeteer.json' ] || for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "/Applications/Chromium.app/Contents/MacOS/Chromium" "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"; do [ -x "$c" ] && printf '{"executablePath":"%s"}' "$c" > '${PNG_DIR}/puppeteer.json' && P="-p ${PNG_DIR}/puppeteer.json" && break; done; ` +
-        `'${mmdc}' $P -i '${PNG_DIR}/${base}.mmd' -o '${png}' -b white -s 2 >/dev/null 2>&1 && ` +
+        `if command -v timeout >/dev/null 2>&1; then ` +
+        `timeout ${LOCAL_RENDER_SECS} '${mmdc}' $P -i '${PNG_DIR}/${base}.mmd' -o '${png}' -b white -s 2 >/dev/null 2>&1; ec=$?; ` +
+        `[ "$ec" -eq 124 ] && exit 124; [ "$ec" -eq 0 ] || exit "$ec"; ` +
+        `else '${mmdc}' $P -i '${PNG_DIR}/${base}.mmd' -o '${png}' -b white -s 2 >/dev/null 2>&1 || exit $?; fi; ` +
         `sips -g pixelWidth -g pixelHeight '${png}'`;
       const { exitCode, stdout } = await run($, sh);
-      const w = /pixelWidth: (\d+)/.exec(stdout ?? "")?.[1];
-      const h = /pixelHeight: (\d+)/.exec(stdout ?? "")?.[1];
-      if ((exitCode ?? 1) === 0 && w && h) {
-        // -s 2: the PNG is the natural layout at 2x — native cell width = w/2/16.
-        const native = Math.max(24, Math.min(100, Math.round(parseInt(w, 10) / 32)));
-        result = { file: png, w: parseInt(w, 10), h: parseInt(h, 10), native };
+      if ((exitCode ?? 1) === 124) {
+        failKind = "timeout";
+      } else {
+        const w = /pixelWidth: (\d+)/.exec(stdout ?? "")?.[1];
+        const h = /pixelHeight: (\d+)/.exec(stdout ?? "")?.[1];
+        if ((exitCode ?? 1) === 0 && w && h) {
+          // -s 2: the PNG is the natural layout at 2x — native cell width = w/2/16.
+          const native = Math.max(24, Math.min(100, Math.round(parseInt(w, 10) / 32)));
+          result = { file: png, w: parseInt(w, 10), h: parseInt(h, 10), native };
+        } else if ((exitCode ?? 1) === 0) {
+          failKind = "meta";
+        } else {
+          failKind = "failed";
+        }
       }
     } catch {
+      failKind = "failed";
       result = null;
     }
   }
   if (!result) {
-    // Tier 1 fallback: mermaid.ink (network) → sips → PNG.
-    try {
-      const jpg = `${PNG_DIR}/${base}.jpg`;
-      const targetPx = 2400;
-      const sh =
-        `mkdir -p '${PNG_DIR}' && curl -sfL --max-time 25 '${inkUrl(code, "img")}?type=png&width=${targetPx}' -o '${jpg}'` +
-        ` && sips -s format png '${jpg}' --out '${png}' >/dev/null 2>&1` +
-        ` && sips -g pixelWidth -g pixelHeight '${png}'`;
-      const { exitCode, stdout } = await run($, sh);
-      const w = /pixelWidth: (\d+)/.exec(stdout ?? "")?.[1];
-      const h = /pixelHeight: (\d+)/.exec(stdout ?? "")?.[1];
-      if ((exitCode ?? 1) === 0 && w && h) {
-        const natural = await naturalCols($, code);
-        result = { file: png, w: parseInt(w, 10), h: parseInt(h, 10), native: natural };
+    // Tier 1 fallback: mermaid.ink (network) — only when explicitly opted in.
+    // Re-check permission immediately before sending so revoke stops in-flight work.
+    if (await getExternalAllowed($)) {
+      try {
+        const jpg = `${PNG_DIR}/${base}.jpg`;
+        const targetPx = 2400;
+        // Permission still holds at the moment of the request construction.
+        if (!(await getExternalAllowed($))) {
+          lastPngDiag = diagLocal(failKind);
+        } else {
+          const sh =
+            `mkdir -p '${PNG_DIR}' && curl -sfL --max-time 25 '${inkUrl(code, "img")}?type=png&width=${targetPx}' -o '${jpg}'` +
+            ` && sips -s format png '${jpg}' --out '${png}' >/dev/null 2>&1` +
+            ` && sips -g pixelWidth -g pixelHeight '${png}'`;
+          const { exitCode, stdout } = await run($, sh);
+          const w = /pixelWidth: (\d+)/.exec(stdout ?? "")?.[1];
+          const h = /pixelHeight: (\d+)/.exec(stdout ?? "")?.[1];
+          if ((exitCode ?? 1) === 0 && w && h) {
+            const natural = await naturalCols($, code);
+            result = { file: png, w: parseInt(w, 10), h: parseInt(h, 10), native: natural };
+          } else {
+            failKind = "remote-failed";
+          }
+        }
+      } catch {
+        failKind = "remote-failed";
+        result = null;
       }
-    } catch {
-      result = null;
+    } else {
+      lastPngDiag = diagLocal(failKind);
     }
   }
+  if (result) {
+    lastPngDiag = null;
+    pngFailedAt.delete(base);
+  } else {
+    if (!lastPngDiag) lastPngDiag = diagLocal(failKind);
+    if (now) pngFailedAt.set(base, now);
+  }
   const wasCached = pngCache.has(base);
-  if (result) pngFailedAt.delete(base);
-  else if (now) pngFailedAt.set(base, now);
   if (!wasCached && result) pngsDirty = true; // a row may have drawn without this PNG
   pngCache.set(base, result);
   return result;
@@ -343,16 +434,24 @@ async function naturalCols($, code) {
   const base = `d${hash(normalize(code))}`;
   if (svgCache.has(base)) return svgCache.get(base);
   let cols = FALLBACK_NATIVE_COLS;
-  try {
-    const { exitCode, stdout } = await run($, `curl -sfL --max-time 20 '${inkUrl(code, "svg")}' | head -c 3000`);
-    if ((exitCode ?? 1) === 0) {
-      const vb = /viewBox="([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+)"/.exec(stdout ?? "");
-      const mw = /max-width:\s*(\d+)px/.exec(stdout ?? "");
-      const naturalPx = vb ? parseFloat(vb[3]) : mw ? parseFloat(mw[1]) : NaN;
-      if (Number.isFinite(naturalPx) && naturalPx > 0) cols = Math.max(24, Math.min(100, Math.round(naturalPx / 16)));
+  // SVG sizing hits mermaid.ink — same opt-in gate as the image fallback.
+  // Re-check immediately before sending so revoke stops queued sizing work.
+  if (await getExternalAllowed($)) {
+    try {
+      if (!(await getExternalAllowed($))) {
+        svgCache.set(base, cols);
+        return cols;
+      }
+      const { exitCode, stdout } = await run($, `curl -sfL --max-time 20 '${inkUrl(code, "svg")}' | head -c 3000`);
+      if ((exitCode ?? 1) === 0) {
+        const vb = /viewBox="([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+)"/.exec(stdout ?? "");
+        const mw = /max-width:\s*(\d+)px/.exec(stdout ?? "");
+        const naturalPx = vb ? parseFloat(vb[3]) : mw ? parseFloat(mw[1]) : NaN;
+        if (Number.isFinite(naturalPx) && naturalPx > 0) cols = Math.max(24, Math.min(100, Math.round(naturalPx / 16)));
+      }
+    } catch {
+      // fallback stands
     }
-  } catch {
-    // fallback stands
   }
   svgCache.set(base, cols);
   return cols;
@@ -409,7 +508,9 @@ async function renderAssistant($, e, next) {
           const sized = sizePng(png, budget, maxRows);
           blocks.push(centered(resolved, { source: { file: sized.file, format: "png" }, columns: sized.columns, rows: sized.rows, alt: await asciiFor($, part.code, budget) }));
         } else {
-          blocks.push(Text({ wrap: "wrap", children: await asciiFor($, part.code, budget) }));
+          const art = await asciiFor($, part.code, budget);
+          const note = lastPngDiag ? `\n\n(${lastPngDiag})` : "";
+          blocks.push(Text({ wrap: "wrap", children: art + note }));
         }
       }
     }
@@ -477,8 +578,8 @@ export function register(on) {
     const r = await next(e);
     await $.command.register({
       name: "mermaid",
-      description: "Mermaid charts: ascii/image mode; /mermaid setup installs renderers",
-      argumentHint: "[ascii|image|setup]",
+      description: "Mermaid charts: ascii/image mode; external on|off; setup installs renderers",
+      argumentHint: "[ascii|image|setup|external on|external off]",
     });
     return r;
   });
@@ -488,7 +589,7 @@ export function register(on) {
     if (e?.agentId) return r; // skip subagent loops
     try {
       if ((await getMode($)) === "image") {
-        for (const code of await lastChartCodes($)) await ensurePng($, code); // pre-warm
+        for (const code of await lastChartCodes($)) await ensurePng($, code); // pre-warm (respects external gate)
         if (pngsDirty) {
           // Rows that drew without a ready PNG show the fallback; a redraw now
           // upgrades them to the image.
@@ -530,7 +631,7 @@ export function register(on) {
             starting.push(label);
             lines.push(`… ${label} — installing in the background`);
           } else {
-            lines.push(`✗ ${label} — could not start the install; run: ${sh}`);
+            lines.push(`✗ ${label} — could not start the install; see /mermaid setup docs (no diagram source is logged)`);
           }
         }
         let text;
@@ -539,36 +640,74 @@ export function register(on) {
           text =
             `Installing ${starting.join(", ")} in the background (log: ${PNG_DIR}/setup.log).` +
             (blocked.length ? `\n${blocked.join("\n")}` : "") +
-            `\nRe-run /mermaid setup to check; new sessions pick renderers up automatically.`;
+            `\nRe-run /mermaid setup to check; new sessions pick renderers up automatically.` +
+            `\nImage mode stays local unless you /mermaid external on (sends full diagram source to mermaid.ink).`;
         } else if (lines.every((l) => l.startsWith("✓"))) {
-          text = "Everything is installed — ascii art via mermaid-ascii, images via mermaid-cli (fallback: curl + sips, built in).";
+          text =
+            "Everything is installed — ascii art via mermaid-ascii, images via mermaid-cli." +
+            "\nRemote mermaid.ink fallback is opt-in: /mermaid external on (sends full diagram source; persists).";
         } else {
           text = `Renderer status:\n${lines.join("\n")}`;
         }
         return { text };
+      }
+      if (/^external\s+on\b/.test(arg) || arg === "external on") {
+        await setExternalAllowed($, true);
+        return {
+          text:
+            "External rendering ON (persists across sessions). " +
+            "When local mermaid-cli is missing or fails, the full diagram source is sent to mermaid.ink " +
+            "(image + SVG sizing). /mermaid external off to revoke.",
+        };
+      }
+      if (/^external\s+off\b/.test(arg) || arg === "external off") {
+        await setExternalAllowed($, false);
+        return {
+          text:
+            "External rendering OFF (persists). Image mode uses only local mermaid-cli; " +
+            "on failure charts fall back to ASCII. No diagram source leaves this machine via mermaid-pane.",
+        };
+      }
+      if (/^external\b/.test(arg)) {
+        const allowed = await getExternalAllowed($);
+        return {
+          text:
+            `External rendering is ${allowed ? "ON" : "OFF"} (persists). ` +
+            (allowed
+              ? "Full diagram source may be sent to mermaid.ink when local render fails. /mermaid external off to revoke."
+              : "Image mode stays local. /mermaid external on allows mermaid.ink (sends full diagram source)."),
+        };
       }
       if (/^(image|ascii)/.test(arg)) {
         const mode = arg.startsWith("image") ? "image" : "ascii";
         modeMemo = mode;
         await $.store.set("mode", mode); // durable across sessions and reloads
         await $.state.set(MODE, mode); // redraws the rows drawing with it
+        const external = await getExternalAllowed($);
         return {
           text:
             mode === "image"
-              ? "Image mode: charts draw as pictures in replies; replies keep their source. /mermaid ascii to switch back."
-              : "ASCII mode: charts draw as art inside each reply. /mermaid image to switch.",
+              ? external
+                ? "Image mode: charts draw as pictures in replies (local mermaid-cli, then mermaid.ink). /mermaid ascii to switch; /mermaid external off to revoke remote."
+                : "Image mode: charts draw as pictures via local mermaid-cli only. Remote mermaid.ink is OFF — /mermaid external on to allow (sends full diagram source; persists). /mermaid ascii to switch."
+              : "ASCII mode: charts draw as art inside each reply (always local). /mermaid image to switch.",
         };
       }
       const mode = await getMode($);
+      const external = await getExternalAllowed($);
       const ascii = await probeFresh($, "mermaid-ascii");
       const mmdc = await probeFresh($, "mmdc", NVM_PATH_PRELUDE);
-      let text = `${mode} mode — /mermaid ${mode === "image" ? "ascii" : "image"} to switch.`;
+      let text = `${mode} mode — external ${external ? "ON" : "OFF"} — /mermaid ${mode === "image" ? "ascii" : "image"} to switch.`;
       if (!ascii || !mmdc) {
         const parts = [];
         parts.push(`mermaid-ascii ${ascii ? "✓" : "✗"}`);
         parts.push(`mermaid-cli ${mmdc ? "✓" : "✗"}`);
         text += `\nrenderers: ${parts.join(" · ")} — /mermaid setup installs missing ones`;
       }
+      if (!external) {
+        text += `\nremote: OFF — /mermaid external on allows mermaid.ink (sends full diagram source; persists)`;
+      }
+      if (lastPngDiag) text += `\nlast image: ${lastPngDiag}`;
       return { text };
     }
     return next(e);

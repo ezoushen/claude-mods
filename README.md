@@ -23,9 +23,10 @@ Thumbnails are real PNG files (`sips -Z 800`) stored under `/tmp/image-preview/`
 
 Renders ```` ```mermaid ```` blocks from the conversation inline, with the chart sitting next to the response that produced it:
 
-- **ascii mode** — each reply's mermaid fence is rewritten in place into rendered ASCII art
-- **image mode** — replies keep their source; each chart draws as a real diagram PNG (local `mmdc` render, mermaid.ink fallback), degrading to art on text-only terminals
-- `/mermaid ascii|image` picks the mode (remembered across sessions) · bare `/mermaid` reports the current mode and renderer status
+- **ascii mode** — each reply's mermaid fence is rewritten in place into rendered ASCII art (always local)
+- **image mode** — replies keep their source; each chart draws as a real diagram PNG via local `mmdc`, degrading to art on failure or text-only terminals
+- **external rendering** — OFF by default; `/mermaid external on` opts into mermaid.ink when local PNG fails (sends full diagram source; persists). Image mode alone is not consent
+- `/mermaid ascii|image` picks the mode · `/mermaid external on|off` gates remote · bare `/mermaid` reports mode, external setting, and renderer status
 - `/mermaid setup` installs the optional renderers in the background (see the mod's README)
 
 ## Install
@@ -50,7 +51,7 @@ claude --plugin-dir ./mermaid-pane
 ## Notes
 
 - [research/](research/) — findings kept while building the mods (e.g. how mermaid rendering works in TUIs).
-- Renderers are optional: without them, mermaid-pane still renders (built-in edge art; PNGs via mermaid.ink + curl/sips).
+- Renderers are optional: without them, mermaid-pane still renders (built-in edge art; local PNG needs mermaid-cli; mermaid.ink is opt-in via `/mermaid external on`).
 
 ## License
 
