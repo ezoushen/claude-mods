@@ -20,9 +20,12 @@ const CELL_H_OVER_CELL_W = 34 / 16;
 
 const MAX_CHAT_ROWS = 10; // chat thumbnail height cap
 
-// A whitespace-delimited token ending in a supported image extension.
+// A whitespace-delimited token ending in a supported image extension. The
+// capture is the bare path: an optional `?query` / `#fragment` suffix (as in
+// `/a/pic.png?w=100`) is matched but left out of group 1, so the file the
+// decoder reads stays clean.
 const PATH_RE =
-  /(?:^|[\s"'([,{])([^\s"'<>]+?\.(?:png|jpg|jpeg|gif|webp|bmp|tif(f)?|heic|heif|ico|svg))(?=[\s"')\]}]|$)/gi;
+  /(?:^|[\s"'([,{])([^\s"'<>]+?\.(?:png|jpg|jpeg|gif|webp|bmp|tif(?:f)?|heic|heif|ico|svg))(?:\?[^#\s"')]*)?(?:#[^\s"')]*)?(?=[\s"')\]}]|$)/gi;
 // An [Image #N] reference token; group 1 is its number.
 const REF_RE = /\[Image\s*#(\d+)\s*\]/gi;
 
@@ -143,18 +146,6 @@ function le32(b, o) {
 
 function le16(b, o) {
   return b[o] | (b[o + 1] << 8);
-}
-
-// True when the terminal can paint an Image element's pixels (kitty, Ghostty
-// and friends). Anything else — plain xterm, screen, a pipe — falls back to an
-// ASCII bitmap, so a preview is always visible.
-async function imageProtocolCapable($) {
-  try {
-    const r = await run($, 'printf %s "$TERM"');
-    return /kitty|ghostty|wezterm|iterm2?|alacritty/i.test(String(r?.stdout ?? ""));
-  } catch {
-    return false;
-  }
 }
 
 // Memoised ASCII bitmaps: key = path|columns|x|rows|fill.

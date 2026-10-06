@@ -127,6 +127,21 @@ describe("image-preview", () => {
     expect(Math.abs(node.props.columns / node.props.rows - want)).toBeLessThan(0.5);
   });
 
+  test("a path with a query or fragment suffix still renders", async ($, on) => {
+    stubWorld(on);
+    on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.text ?? "")] }));
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
+
+    const ui = await mount($, "UserMessage", { text: `see ${WORK}/pic.png?w=100#top`, origin: { kind: "composer" }, isExpanded: true }, { columns: 120, rows: 40 });
+    expect(await ui.find({ type: "Image" })).toBeDefined();
+    // The suffix is stripped from what the decoder reads: the Image sources
+    // the clean pic.png copy (hash 78ek45), while the prompt text — suffix
+    // and all — stays verbatim in the engine's own block.
+    const tree = JSON.stringify(await ui.drawn());
+    expect(tree).toContain('"file":"/tmp/image-preview/78ek45.png"');
+    expect(tree).toContain("see /work/pic.png?w=100#top");
+  });
+
   test("a prompt with no image draws nothing extra (falls through)", async ($, on) => {
     stubWorld(on);
     on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.text ?? "")] }));
