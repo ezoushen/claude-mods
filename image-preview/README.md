@@ -15,9 +15,7 @@ Every thumbnail is an `Image` element sourcing a real PNG file
 `mermaid-pane` mod presents its diagrams:
 
 - **kitty / Ghostty**: the engine paints actual pixels.
-- **Other terminals**: the engine degrades the element to its `alt`, which
-  carries the ASCII bitmap of the same picture (sips → BMP → luminance ramp),
-  so a preview is still visible.
+- **Other terminals**: the engine draws the `alt` — the picture's file name.
 
 ## Terminal gate (important inside multiplexers)
 

@@ -6,11 +6,6 @@ type AnyHook = (...args: any[]) => unknown;
 const mem: Record<string, unknown> = {};
 const WORK = "/work";
 
-// A valid 6x4 24-bit BMP (luminance rows 0/85/170/255) — what the ASCII
-// fallback path reads back after its `sips … -s format bmp` conversion.
-const BMP_B64 =
-  "Qk2GAAAAAAAAADYAAAAoAAAABgAAAAQAAAABABgAAAAAAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABVVVVVVVVVVVVVVVVVVVVVVVUAAKqqqqqqqqqqqqqqqqqqqqqqqgAA////////////////////////AAA=";
-
 // Build a world where any `*.png`/`*.jpg` path is a real file, `sips`
 // converts it to 400x300, and `$.fs.read` yields some base64 bytes.
 // `term` decides whether the terminal can paint Image pixels (kitty-like) or
@@ -47,7 +42,6 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, term = "xterm-gho
   on("fs.read", (_$: unknown, e: { path: string; as?: string }) => {
     // The engine reads an Image's { file, format: "png" } source by name; the
     // bytes answer stays valid PNG for surfaces that want the payload.
-    if (String(e?.path ?? "").endsWith(".bmp")) return { value: { base64: BMP_B64 } };
     if (e?.as === "bytes") return { value: { base64: PNG_B64 } };
     return { value: "" };
   });
@@ -109,9 +103,6 @@ describe("image-preview", () => {
     // Identical to a no-image block: the engine's own Text carries the whole
     // prompt verbatim, with the Image block added below it — nothing rewritten.
     expect(tree).toContain('"children":["look at /work/pic.png"]');
-    // The alt degrades to the ASCII bitmap of the same picture (mermaid's
-    // asciiFor): the stub BMP's brightest rows map to '@' on the ramp.
-    expect(tree).toContain("@");
     // Aspect-fill, never stretched: the block's cell aspect matches the
     // picture's pixel aspect through the 16x34px cell (400x300 -> 2.833 c/r).
     const drawn = JSON.parse(tree);
