@@ -17,36 +17,9 @@ Every thumbnail is an `Image` element sourcing a real PNG file
 - **kitty / Ghostty**: the engine paints actual pixels.
 - **Other terminals**: the engine draws the `alt` — the picture's file name.
 
-## Opt-in: the mod renders only when the flag is set
+## Toggle rendering
 
-The same flag is the mod's switch. Unset, the mod is a complete no-op — no
-state reads, no sips calls, no scans; rows render exactly as they would
-without it. Set it (per the gate section below) and thumbnails render.
-
-## Terminal gate (important inside multiplexers)
-
-Claude Code paints `Image` elements only when the kitty-graphics capability
-is settled. It probes the terminal at startup: the **XTVERSION reply name must
-be in its `["kitty", "ghostty"]` whitelist**, and the terminal must answer a
-live graphics query.
-
-Inside **herdr** (or any multiplexer that changes the terminal identity —
-Ghostty reports `libghostty` through it), that whitelist check fails and
-thumbnails degrade to alt text. Force the capability on instead:
-
-```sh
-CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1 claude --plugin-dir ./image-preview
-```
-
-Only do this in a terminal that actually supports the kitty graphics protocol
-(it answers the graphics query — Ghostty and kitty do).
-
-To stop prefixing every launch, set the flag once for all herdr panes — put
-this in `~/.zshrc` (herdr panes run interactive zsh; the `TERM_PROGRAM` guard
-keeps plain terminals on their own probe):
-
-```zsh
-if [ "$TERM_PROGRAM" = "herdr" ]; then
-  export CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1
-fi
-```
+`/image off` turns thumbnails off — a complete no-op: rows render exactly as
+without the mod, no state reads, no sips calls, no scans. `/image on` turns
+them back on. `/image list` and `/image clear` manage the stored paths; the
+toggle is stored per session and defaults to on.

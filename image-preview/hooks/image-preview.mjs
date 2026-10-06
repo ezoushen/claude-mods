@@ -128,9 +128,8 @@ function imageRefs(text, cwd) {
 }
 
 // One thumbnail per resolvable reference, in document order.
-async function collectThumbs($, text, C) {
+async function collectThumbs($, text, gallery, C) {
   const cwd = (await $.session.cwd().catch(() => "/")).trim();
-  const gallery = await loadGallery($);
   const nodes = [];
   for (const ref of imageRefs(text, cwd)) {
     const path = ref.abs ?? gallery[ref.num - 1] ?? null;
@@ -158,38 +157,33 @@ async function collectThumbs($, text, C) {
   return nodes;
 }
 
-// Some render passes read state before it is available (the raw answer comes
-// back { version } with no value), which would make gallery thumbnails flicker
-// out on redraws. Remember the last non-empty gallery and fall back to it.
-let lastGallery = [];
+// The mod's state: { gallery: string[], render: boolean } — render defaults
+// to true. Some render passes read state before it is available (the raw
+// answer comes back { version } with no value), which would flicker the
+// thumbnails; remember the last successfully read state and fall back to it.
+let lastState = { gallery: [], render: true };
 
-async function loadGallery($) {
+async function loadState($) {
   try {
     const { value } = await $.state.get(NS);
-    const gallery = value?.state?.gallery;
-    if (Array.isArray(gallery) && gallery.length) lastGallery = gallery;
-    return Array.isArray(gallery) && gallery.length ? gallery : lastGallery;
-  } catch {
-    return lastGallery;
-  }
+    const st = value?.state;
+    if (st && Array.isArray(st.gallery)) {
+      lastState = { gallery: st.gallery, render: st.render !== false };
+    }
+  } catch {}
+  return lastState;
 }
 
-// Opt-in and capability gate in one: CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1 is
-// the same switch the engine's own kitty-graphics gate honors — set it where
-// the terminal paints (the README shows a herdr-scoped zshrc guard). Unset,
-// the mod is a complete no-op: no state reads, no sips, no scans.
-async function paints($) {
-  try {
-    return (await $.env.get("CLAUDE_CODE_FORCE_TERMINAL_IMAGES")) === "1";
-  } catch {
-    return false;
-  }
+function saveState($, state) {
+  lastState = state; // immediate consistency; the next read re-confirms
+  return $.state.set(NS, { state });
 }
 
 // Shared render body for both row types: the engine's own block, untouched —
 // identical to a no-image row — with the thumbnails appended below it.
 async function renderRow($, e, next) {
-  if (!(await paints($))) return next(e);
+  const state = await loadState($);
+  if (!state.render) return next(e); // off: a complete no-op
 
   const props = e?.props ?? {};
   const text = props.text;
@@ -197,7 +191,7 @@ async function renderRow($, e, next) {
 
   const maxColumns = e?.viewport?.columns ?? props.bodyColumns ?? 60;
   const C = { ...$.ui.resolve(e), maxColumns };
-  const nodes = await collectThumbs($, text, C);
+  const nodes = await collectThumbs($, text, state.gallery, C);
   if (!nodes.length) return next(e);
 
   const body = await next(e);
@@ -232,19 +226,26 @@ export function register(on) {
     if (e?.command !== "image") return next(e);
     const arg = (e?.args ?? "").trim();
     if (!arg) {
-      return { text: "image: stores image paths for inline preview. /image <path...> to add, /image list, /image clear." };
+      return { text: "image: /image <path...> to store, [Image #N] to reference; /image on|off toggles thumbnails; /image list, /image clear." };
     }
     if (/^(list)$/.test(arg)) {
-      const gallery = await loadGallery($);
+      const { gallery } = await loadState($);
       return { text: gallery.length ? gallery.map((p, i) => `[Image #${i + 1}]  ${p}`).join("\n") : "Gallery empty." };
     }
+    if (/^(on|off)$/.test(arg)) {
+      const cur = await loadState($);
+      const render = arg === "on";
+      await saveState($, { gallery: cur.gallery, render });
+      return { text: `image-preview rendering ${render ? "on" : "off"}.` };
+    }
     if (/^(clear|reset)$/.test(arg)) {
-      await $.state.set(NS, { state: { gallery: [] } });
+      const cur = await loadState($);
+      await saveState($, { gallery: [], render: cur.render });
       return { text: "image-preview gallery cleared." };
     }
 
     const cwd = (await $.session.cwd().catch(() => "/")).trim();
-    const gallery = await loadGallery($);
+    const { gallery, render } = await loadState($);
     const added = [];
     for (const raw of arg.split(/\s+/)) {
       if (!raw) continue;
@@ -253,7 +254,7 @@ export function register(on) {
       if (!added.includes(abs)) added.push(abs);
     }
     if (!added.length) return { text: "Nothing new to store." };
-    await $.state.set(NS, { state: { gallery } });
+    await saveState($, { gallery, render });
     const tokens = added.map((p) => `[Image #${gallery.indexOf(p) + 1}]`);
     return { text: `Stored ${added.length} image${added.length === 1 ? "" : "s"}:` + tokens.map((t) => `\n${t}`).join("") };
   });

@@ -121,13 +121,18 @@ describe("image-preview", () => {
     expect(tree).toContain("see /work/pic.png?w=100#top");
   });
 
-  test("without the opt-in flag the mod is a no-op (zero overhead)", async ($, on) => {
-    stubWorld(on, ""); // flag unset — the mod must be a complete no-op
+  test("with rendering toggled off the mod is a complete no-op", async ($, on) => {
+    stubWorld(on);
     on("ui.render", (_$: unknown, e: any) => ({ type: "Text", props: {}, children: [String(e?.props?.text ?? "")] }));
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
 
+    await runImage($, "off");
     const ui = await mount($, "UserMessage", { text: `look at ${WORK}/pic.png`, origin: { kind: "composer" }, isExpanded: true }, { columns: 120, rows: 40 });
     expect(await ui.find({ type: "Image" })).not.toBeDefined();
+
+    await runImage($, "on");
+    const ui2 = await mount($, "UserMessage", { text: `look at ${WORK}/pic.png`, origin: { kind: "composer" }, isExpanded: true }, { columns: 120, rows: 40 });
+    expect(await ui2.find({ type: "Image" })).toBeDefined();
   });
 
   test("a prompt with no image draws nothing extra (falls through)", async ($, on) => {
