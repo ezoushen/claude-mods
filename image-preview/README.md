@@ -34,3 +34,13 @@ CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1 claude --plugin-dir ./image-preview
 
 Only do this in a terminal that actually supports the kitty graphics protocol
 (it answers the graphics query — Ghostty and kitty do).
+
+To stop prefixing every launch, set the flag once for all herdr panes — put
+this in `~/.zshrc` (herdr panes run interactive zsh; the `TERM_PROGRAM` guard
+keeps plain terminals on their own probe):
+
+```zsh
+if [ "$TERM_PROGRAM" = "herdr" ]; then
+  export CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1
+fi
+```
