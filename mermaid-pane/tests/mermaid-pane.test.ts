@@ -123,7 +123,7 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, opts: StubOpts = 
       return { value: { exitCode: 0, stdout: "pixelWidth: 876\npixelHeight: 196" } };
     }
     if (opts.png && s.includes("curl")) return { value: { exitCode: 0, stdout: "" } };
-    // Generic which for mermaid-ascii / npm / timeout
+    // Generic which for termaid / npm / timeout
     const m = /command -v ([a-z0-9-]+)/.exec(s);
     if (m && m[1]) {
       const present = opts.present ?? [];
@@ -193,7 +193,7 @@ describe("mermaid-pane", () => {
   test("ascii mode rewrites each mermaid fence into uncut edge art", async ($, on) => {
     resetMem();
     echoRow(on);
-    stubWorld(on); // no mermaid-ascii → built-in edge art
+    stubWorld(on); // no termaid → built-in edge art
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
 
     const ui = await mountRow($, REPLY_EDGES);
@@ -363,18 +363,18 @@ describe("mermaid-pane", () => {
     }
   });
 
-  test("/mermaid setup starts prebuilt installs for missing renderers and skips present ones", async ($, on) => {
+  test("/mermaid setup starts installs for missing renderers and skips present ones", async ($, on) => {
     resetMem();
-    stubWorld(on, { present: ["npm"] }); // renderers missing, npm present
+    stubWorld(on, { present: ["npm", "python3"] }); // renderers missing, toolchains present
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
 
     const out = (await callMermaid($, "setup")).text;
-    expect(out).toMatch(/installing mermaid-ascii, mermaid-cli \(mmdc\) in the background/i);
+    expect(out).toMatch(/installing termaid, mermaid-cli \(mmdc\) in the background/i);
     expect(setupRuns.length).toBe(2);
-    // mermaid-ascii: prebuilt release download, platform matched via uname
-    expect(setupRuns[0]).toContain("releases/latest/download/mermaid-ascii_");
-    expect(setupRuns[0]).toContain("uname -s");
-    expect(setupRuns[0]).toContain("$HOME/.local/bin/mermaid-ascii");
+    // termaid: pip --user install, console script linked into ~/.local/bin
+    expect(setupRuns[0]).toContain("pip install --user");
+    expect(setupRuns[0]).toContain("termaid");
+    expect(setupRuns[0]).toContain("$HOME/.local/bin/termaid");
     // mermaid-cli: correct scoped npm package, pinned to the Node major found
     expect(setupRuns[1]).toContain("@mermaid-js/mermaid-cli");
     expect(setupRuns[1]).not.toContain("@mermaid-cli@latest");
@@ -382,22 +382,34 @@ describe("mermaid-pane", () => {
     expect(out).toMatch(/external on/i);
   });
 
+  test("/mermaid setup reports missing python3 instead of starting a doomed termaid install", async ($, on) => {
+    resetMem();
+    stubWorld(on, { present: ["npm"] }); // python missing; npm present so mmdc can start
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+    const out = await callMermaid($, "setup");
+    expect(out.text).toMatch(/termaid — install it manually \(needs Python 3\.9\+ and pip\)/);
+    expect(setupRuns.length).toBe(1); // only the mermaid-cli install starts
+    expect(setupRuns[0]).toContain("@mermaid-js/mermaid-cli");
+  });
+
   test("/mermaid setup reports missing npm instead of starting a doomed mmdc install", async ($, on) => {
     resetMem();
-    stubWorld(on); // nothing present at all
+    stubWorld(on, { present: ["python3"] }); // npm missing; python present so termaid can start
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
     const out = await callMermaid($, "setup");
     expect(out.text).toMatch(/mermaid-cli \(mmdc\) — install it manually \(needs Node \+ npm\)/);
-    expect(setupRuns.length).toBe(1); // only the mermaid-ascii download starts
-    expect(setupRuns[0]).toContain("releases/latest/download/mermaid-ascii_");
+    expect(setupRuns.length).toBe(1); // only the termaid install starts
+    expect(setupRuns[0]).toContain("pip install --user");
+    expect(setupRuns[0]).toContain("termaid");
   });
 
   test("/mermaid setup stays quiet when everything is installed", async ($, on) => {
     resetMem();
-    stubWorld(on, { present: ["mermaid-ascii", "mmdc"] });
+    stubWorld(on, { present: ["termaid", "mmdc"] });
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
     const out = await callMermaid($, "setup");
     expect(out.text).toMatch(/everything is installed/i);
+    expect(out.text).toMatch(/termaid/i);
     expect(out.text).toMatch(/opt-in/i);
     expect(setupRuns.length).toBe(0);
   });
@@ -408,7 +420,7 @@ describe("mermaid-pane", () => {
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
     const out = await callMermaid($, "");
     expect(out.text).toMatch(/mode — external OFF — \/mermaid (ascii|image) to switch\./);
-    expect(out.text).toMatch(/renderers: mermaid-ascii ✗ · mermaid-cli ✗ — \/mermaid setup/);
+    expect(out.text).toMatch(/renderers: termaid ✗ · mermaid-cli ✗ — \/mermaid setup/);
     expect(out.text).toMatch(/remote: OFF/);
   });
 });
