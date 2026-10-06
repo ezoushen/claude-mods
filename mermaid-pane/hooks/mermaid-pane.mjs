@@ -1,26 +1,20 @@
-// mermaid-pane — presents ```mermaid blocks from the conversation as ASCII art
-// or images, per the user's pick (see research/mermaid-in-tui.md).
+// mermaid-pane — renders ```mermaid blocks from the conversation inline, as
+// ASCII art or images, per the user's pick (see research/mermaid-in-tui.md).
 //
-// Modes (via /mermaid ascii | /mermaid image, persisted in $.state):
+// Modes (via /mermaid ascii | /mermaid image; picked per session in $.state,
+// remembered across sessions in $.store):
 //   ascii — each reply's mermaid fence is rewritten in place into rendered
 //           ASCII art (the chart sits with the response it belongs to)
-//   image — replies keep their source; the /mermaid pane draws real diagram
-//           PNGs as Image elements, degrading to art where the terminal
-//           cannot draw images
-// Either way, /mermaid opens the pane with every chart of the session and
-// [ Open ↗ ] hands off to the full-fidelity mermaid.ink SVG.
+//   image — replies keep their source; each chart draws as a real diagram
+//           PNG, degrading to art where the terminal cannot draw images
 //
 // No-cut strategy (art): tiered mermaid-ascii spacing → built-in edge-list
 // art → the source itself; every Text draws with wrap:'wrap', lines wrap,
 // never clip. PNG path: mermaid.ink JPEG → sips → PNG file, decoded by the
 // terminal itself (no pixel crosses $).
 
-const NS = { plugin: "mermaid-pane", key: "diagrams" };
-const TOOL = { plugin: "mermaid-pane", key: "asciiTool" };
-const MODE = { plugin: "mermaid-pane", key: "mode" };
-const PANE_ID = "mermaid";
+const MODE = { plugin: "mermaid-pane", key: "mode" }; // read while drawing: a set redraws the drawer
 const PNG_DIR = "/tmp/mermaid-pane";
-const MAX_DIAGRAMS = 20;
 
 // Module-level memos: survive redraws, reset on hot reload (fine for caches).
 const artCache = new Map(); // `${budget}|${code}` -> art string
@@ -63,33 +57,27 @@ function shellQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
-function diagramTitle(code) {
-  const first = code.split("\n")[0].trim();
-  const m = /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram-v?\d*|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|quadrantChart|xychart|sankey)/i.exec(first);
-  return m ? m[1] : "diagram";
-}
-
 let modeMemo; // undefined = not loaded this load; render path must stay sync-fast
 
 async function getMode($) {
-  if (modeMemo !== undefined) return modeMemo;
-  try {
-    const remembered = await $.store.get("mode"); // durable across sessions
-    if (remembered === "image" || remembered === "ascii") {
-      modeMemo = remembered;
-      return remembered;
+  if (modeMemo === undefined) {
+    try {
+      const { value } = await $.state.get(MODE); // this session's pick; subscribes the drawer
+      if (value === "image" || value === "ascii") {
+        modeMemo = value;
+        return modeMemo;
+      }
+    } catch {
+      // fall through to the durable store
     }
-  } catch {
-    // fall through to session state
+    try {
+      const remembered = await $.store.get("mode"); // durable across sessions and reloads
+      modeMemo = remembered === "image" ? "image" : "ascii";
+    } catch {
+      modeMemo = "ascii";
+    }
   }
-  try {
-    const { value } = await $.state.get(MODE);
-    modeMemo = value === "image" ? "image" : "ascii";
-    return modeMemo;
-  } catch {
-    modeMemo = "ascii";
-    return modeMemo;
-  }
+  return modeMemo;
 }
 
 async function run($, cmd) {
@@ -220,7 +208,6 @@ async function ensurePng($, code) {
   }
   const failedAt = pngFailedAt.get(base);
   if (now && failedAt !== undefined && now - failedAt < 60000) return null;
-  if (now) pngFailedAt.set(base, now);
   let result = null;
   const png = `${PNG_DIR}/${base}.png`;
   const mmdc = await mmdcPath($);
@@ -303,121 +290,28 @@ function centered(box, child, key) {
   return Box({ width: "100%", alignItems: "center", paddingY: 1, children: [Image({ key, source: child.source, columns: child.columns, rows: child.rows, alt: child.alt })] });
 }
 
-// --- scroll profiling: per-hook render cost + transcript cache stats --------
+// --- transcript scan (for the image-mode pre-warm on turn completion) -------
 
-const profile = {
-  assistant: { n: 0, total: 0, max: 0 },
-  pane: { n: 0, total: 0, max: 0 },
-  msgFetch: 0,
-  msgCache: 0,
-};
-
-function nowMs() {
-  try {
-    return typeof Date !== "undefined" ? Date.now() : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function record(stat, dt) {
-  stat.n += 1;
-  stat.total += dt;
-  if (dt > stat.max) stat.max = dt;
-}
-
-function profileText() {
-  const f = (s) => (s.n === 0 ? "0 renders" : `${s.n} renders, avg ${Math.round(s.total / s.n)}ms, max ${Math.round(s.max)}ms`);
-  return [
-    `assistant rows: ${f(profile.assistant)}`,
-    `pane: ${f(profile.pane)}`,
-    `transcript: ${profile.msgFetch} fetches, ${profile.msgCache} cache hits`,
-  ].join("\n");
-}
-
-function resetProfile() {
-  for (const s of [profile.assistant, profile.pane]) {
-    s.n = 0;
-    s.total = 0;
-    s.max = 0;
-  }
-  profile.msgFetch = 0;
-  profile.msgCache = 0;
-}
-
-// --- collection (defensive: message rows are { role, text, toolUses }) ------
-
-// Scroll renders call collect() many times a second; serializing the whole
-// conversation each time is the lag. 1s TTL cache; persist bypasses it.
-let msgsCache = { at: -Infinity, rows: [] };
-
-async function loadMessages($, fresh) {
-  if (!fresh) {
-    try {
-      const now = await $.clock.now();
-      if (now && now - msgsCache.at < 1000) {
-        profile.msgCache += 1;
-        return msgsCache.rows;
-      }
-    } catch {
-      // no clock: fetch every time
-    }
-  }
-  let rows = msgsCache.rows;
+// The newest distinct mermaid codes in the conversation, oldest first. Called
+// once a turn, so no caching; defensive about message row shapes.
+async function lastChartCodes($) {
+  let rows = [];
   try {
     rows = (await $.session.messages()) ?? [];
-    profile.msgFetch += 1;
   } catch {
-    rows = msgsCache.rows; // keep the last good transcript
+    return [];
   }
-  try {
-    const now = await $.clock.now();
-    if (now) {
-      msgsCache.at = now;
-      msgsCache.rows = rows;
-    }
-  } catch {
-    // no clock: skip caching
-  }
-  return rows;
-}
-
-async function collect($, persist = false) {
-  let msgs;
-  try {
-    msgs = (await loadMessages($, persist)) ?? [];
-  } catch {
-    return { diagrams: [] };
-  }
-  const found = [];
-  for (const t of Array.isArray(msgs) ? msgs : []) {
+  const codes = [];
+  for (const t of Array.isArray(rows) ? rows : []) {
     const text = typeof t?.text === "string" ? t.text : "";
     const role = t?.role;
     if (!text || (role && !/assistant|model/i.test(String(role)))) continue;
     for (const m of text.matchAll(/```mermaid[^\n]*\n([\s\S]*?)```/g)) {
       const code = m[1].trim();
-      if (code && !found.some((d) => d.code === code)) {
-        found.push({ id: "", title: diagramTitle(code), code });
-      }
+      if (code && !codes.includes(code)) codes.push(code);
     }
   }
-  if (!found.length) return { diagrams: [] };
-  const { value: prev = [] } = await $.state.get(NS);
-  const merged = [...prev];
-  for (const d of found) if (!merged.some((x) => x.code === d.code)) merged.push(d);
-  const added = merged.length !== prev.length;
-  const capped = merged.slice(-MAX_DIAGRAMS).map((d, i) => ({ ...d, id: d.id || `m${i + 1}` }));
-  if (persist && added) await $.state.set(NS, capped);
-  return { diagrams: capped };
-}
-
-async function openInBrowser($, d) {
-  try {
-    await $.process.run(["open", inkUrl(d.code, "svg")]);
-    await $.ui.toast("Mermaid preview opened in browser");
-  } catch (err) {
-    await $.ui.toast("mermaid-pane: " + (err?.message ?? String(err)));
-  }
+  return codes.slice(-3);
 }
 
 // Transcript budget: replies draw full width less the bullet indent, the
@@ -425,13 +319,6 @@ async function openInBrowser($, d) {
 function budgetOf(e) {
   const columns = e?.viewport?.columns ?? 120;
   return Math.max(24, Math.min(160, columns - 14));
-}
-
-// Pane budget: the pane docks beside the transcript (roughly half the screen),
-// less a margin inside its padded frame.
-function paneBudgetOf(e) {
-  const columns = e?.viewport?.columns ?? 120;
-  return Math.max(24, Math.min(140, Math.floor(columns * 0.45) - 4));
 }
 
 // Native cell width of a diagram, from the SVG's own viewBox (like a font's
@@ -495,7 +382,8 @@ async function renderAssistant($, e, next) {
   if (typeof text !== "string" || !text.includes("```mermaid")) return next(e);
   const budget = budgetOf(e);
   const maxRows = Math.max(8, Math.round((e?.viewport?.rows ?? 40) * 0.7));
-  const { Box, Text } = $.ui.resolve(e);
+  const resolved = $.ui.resolve(e);
+  const { Box, Text } = resolved;
   if ((await getMode($)) === "image") {
     const blocks = [];
     for (const part of splitByFences(text)) {
@@ -506,7 +394,7 @@ async function renderAssistant($, e, next) {
         const png = await ensurePng($, part.code);
         if (png) {
           const sized = sizePng(png, budget, maxRows);
-          blocks.push(centered($.ui.resolve(e), { source: { file: sized.file, format: "png" }, columns: sized.columns, rows: sized.rows, alt: await asciiFor($, part.code, budget) }));
+          blocks.push(centered(resolved, { source: { file: sized.file, format: "png" }, columns: sized.columns, rows: sized.rows, alt: await asciiFor($, part.code, budget) }));
         } else {
           blocks.push(Text({ wrap: "wrap", children: await asciiFor($, part.code, budget) }));
         }
@@ -520,35 +408,52 @@ async function renderAssistant($, e, next) {
   return next({ ...e, props: { ...e.props, text: out } });
 }
 
-async function renderPane($, e, next) {
-  const { diagrams } = await collect($); // read-only: render hooks may not write state
-  if (!diagrams.length) return next(e);
-  const mode = await getMode($);
-  const resolved = $.ui.resolve(e);
-  const { Box, Text, Button } = resolved;
-  const shown = diagrams.slice(-3);
-  const budget = paneBudgetOf(e);
-  const blocks = [];
-  for (let i = 0; i < shown.length; i++) {
-    const d = shown[i];
-    blocks.push(Text({ bold: true, children: `▤ mermaid ${i + 1}/${shown.length} · ${d.title}` }));
-    if (mode === "image") {
-      const png = await ensurePng($, d.code);
-      if (png) {
-        const bodyRows = e?.props?.scroll?.bodyRows ?? 30;
-        const sized = sizePng(png, budget - 2, bodyRows - 2);
-        blocks.push(centered(resolved, { source: { file: sized.file, format: "png" }, columns: sized.columns, rows: sized.rows, alt: await asciiFor($, d.code, budget) }, `mermaid-${d.id}`));
-      } else {
-        blocks.push(Text({ key: `mermaid-${d.id}`, wrap: "wrap", children: await asciiFor($, d.code, budget) }));
-      }
-    } else {
-      blocks.push(Text({ key: `mermaid-${d.id}`, wrap: "wrap", children: await asciiFor($, d.code, budget) }));
-    }
-    if (i < shown.length - 1) blocks.push(Text({ children: "" }));
+// --- optional renderers: availability + one-shot setup -----------------------
+
+// Fresh (non-memoized) probe — setup must see installs made this session.
+async function probeBin($, bin) {
+  try {
+    const { exitCode, stdout } = await run($, `command -v ${bin} || true`);
+    return (exitCode ?? 1) === 0 && stdout?.trim() ? stdout.trim() : null;
+  } catch {
+    return null;
   }
-  blocks.push(Text({ dimColor: true, children: `${mode} mode · /mermaid ${mode === "image" ? "ascii" : "image"} to switch · /mermaid close` }));
-  blocks.push(Button({ label: "Open ↗", onPress: () => openInBrowser($, shown[shown.length - 1]) }));
-  return Box({ flexDirection: "column", gap: 1, padding: 1, children: blocks });
+}
+
+// Preferred Python manager first; mermaid-ascii is a Python CLI.
+const ASCII_MANAGERS = [
+  ["uv", "uv tool install mermaid-ascii"],
+  ["pipx", "pipx install mermaid-ascii"],
+  ["pip3", "pip3 install --user mermaid-ascii"],
+];
+
+async function installSh($, key) {
+  if (key === "ascii") {
+    for (const [, cmd] of ASCII_MANAGERS) {
+      if (await probeBin($, cmd.split(" ")[0])) return cmd;
+    }
+    return null; // no Python manager found
+  }
+  // mermaid-cli: npm -g, with the nvm PATH prelude (the hook's sh may not source nvm).
+  if (!(await probeBin($, "npm"))) return null;
+  return (
+    `NB=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | tail -1); [ -n "$NB" ] && export PATH="$NB:$PATH"; ` +
+    `npm install -g @mermaid-cli`
+  );
+}
+
+// Installs run detached (nohup) so the hook never blocks on npm/pip; the log
+// lands in PNG_DIR and a re-run of /mermaid setup reports progress.
+async function startInstall($, key, sh) {
+  try {
+    const r = await run(
+      $,
+      `mkdir -p '${PNG_DIR}' && printf '%s' ${shellQuote(sh)} > '${PNG_DIR}/install-${key}.sh' && nohup sh '${PNG_DIR}/install-${key}.sh' >> '${PNG_DIR}/setup.log' 2>&1 & echo started`
+    );
+    return /started/.test(r.stdout ?? "");
+  } catch {
+    return false;
+  }
 }
 
 // --- registration ------------------------------------------------------------
@@ -558,8 +463,8 @@ export function register(on) {
     const r = await next(e);
     await $.command.register({
       name: "mermaid",
-      description: "Mermaid charts: session gallery pane",
-      argumentHint: "[ascii|image|close|profile]",
+      description: "Mermaid charts: ascii/image mode; /mermaid setup installs renderers",
+      argumentHint: "[ascii|image|setup]",
     });
     return r;
   });
@@ -568,12 +473,8 @@ export function register(on) {
     const r = await next(e);
     if (e?.agentId) return r; // skip subagent loops
     try {
-      const { diagrams } = await collect($, true); // retain for the /mermaid pane
-      const tool = await probeTool($);
-      const { value: known } = await $.state.get(TOOL);
-      if (known === undefined || known !== tool) await $.state.set(TOOL, tool);
       if ((await getMode($)) === "image") {
-        for (const d of diagrams.slice(-3)) await ensurePng($, d.code); // pre-warm
+        for (const code of await lastChartCodes($)) await ensurePng($, code); // pre-warm
         if (pngsDirty) {
           // Rows that drew without a ready PNG show the fallback; a redraw now
           // upgrades them to the image.
@@ -588,50 +489,69 @@ export function register(on) {
   });
 
   on("ui.render", { component: "AssistantMessage" }, async ($, e, next) => {
-    const t0 = await nowMs($);
-    const out = await renderAssistant($, e, next);
-    record(profile.assistant, (await nowMs($)) - t0);
-    return out;
-  });
-
-  on("ui.render", { component: "Pane" }, async ($, e, next) => {
-    const t0 = await nowMs($);
-    const out = await renderPane($, e, next);
-    record(profile.pane, (await nowMs($)) - t0);
-    return out;
+    return renderAssistant($, e, next);
   });
 
   on("command.run", async ($, e, next) => {
     if (e?.command === "mermaid") {
       const arg = (e?.args ?? "").trim().toLowerCase();
-      if (/^(close|hide)/.test(arg)) {
-        await $.ui.close({ id: PANE_ID });
-        return { text: "Mermaid pane closed." };
-      }
-      if (/^profile/.test(arg)) {
-        const text = `profile since last reset:\n${profileText()}`;
-        resetProfile();
+      if (/^setup/.test(arg)) {
+        const lines = [];
+        const starting = [];
+        const ascii = await probeBin($, "mermaid-ascii");
+        const mmdc = await probeBin($, "mmdc");
+        if (ascii) lines.push("✓ mermaid-ascii (better ASCII art)");
+        if (mmdc) lines.push("✓ mermaid-cli (offline PNG rendering)");
+        for (const [key, have, label, need] of [
+          ["ascii", ascii, "mermaid-ascii", "a Python manager (uv, pipx or pip3)"],
+          ["mmdc", mmdc, "mermaid-cli (mmdc)", "Node + npm"],
+        ]) {
+          if (have) continue;
+          const sh = await installSh($, key);
+          if (!sh) {
+            lines.push(`✗ ${label} — install it manually (needs ${need})`);
+            continue;
+          }
+          if (await startInstall($, key, sh)) {
+            starting.push(label);
+            lines.push(`… ${label} — installing in the background`);
+          } else {
+            lines.push(`✗ ${label} — could not start the install; run: ${sh}`);
+          }
+        }
+        let text;
+        if (starting.length) {
+          text = `Installing ${starting.join(", ")} in the background (log: ${PNG_DIR}/setup.log).\nRe-run /mermaid setup to check; new sessions pick renderers up automatically.`;
+        } else if (lines.every((l) => l.startsWith("✓"))) {
+          text = "Everything is installed — ascii art via mermaid-ascii, images via mermaid-cli (fallback: curl + sips, built in).";
+        } else {
+          text = `Renderer status:\n${lines.join("\n")}`;
+        }
         return { text };
       }
       if (/^(image|ascii)/.test(arg)) {
         const mode = arg.startsWith("image") ? "image" : "ascii";
         modeMemo = mode;
-        await $.state.set(MODE, mode);
+        await $.store.set("mode", mode); // durable across sessions and reloads
+        await $.state.set(MODE, mode); // redraws the rows drawing with it
         return {
           text:
             mode === "image"
-              ? "Image mode: charts draw as pictures in the /mermaid pane; replies keep their source. /mermaid ascii to switch back."
-              : "ASCII mode: charts draw as art inside each reply (and in the pane). /mermaid image to switch.",
+              ? "Image mode: charts draw as pictures in replies; replies keep their source. /mermaid ascii to switch back."
+              : "ASCII mode: charts draw as art inside each reply. /mermaid image to switch.",
         };
       }
-      const r = await $.ui.open({ id: PANE_ID, title: "Mermaid", focus: true });
-      const placed = r?.value?.isPlaced ?? r?.isPlaced;
-      return {
-        text:
-          placed === false
-            ? "Terminal too narrow for a docked pane — mermaid diagrams draw inline above the prompt."
-            : `Mermaid pane opened (${await getMode($)} mode).`,
-      };
+      const mode = await getMode($);
+      const ascii = await probeBin($, "mermaid-ascii");
+      const mmdc = await probeBin($, "mmdc");
+      let text = `${mode} mode — /mermaid ${mode === "image" ? "ascii" : "image"} to switch.`;
+      if (!ascii || !mmdc) {
+        const parts = [];
+        parts.push(`mermaid-ascii ${ascii ? "✓" : "✗"}`);
+        parts.push(`mermaid-cli ${mmdc ? "✓" : "✗"}`);
+        text += `\nrenderers: ${parts.join(" · ")} — /mermaid setup installs missing ones`;
+      }
+      return { text };
     }
     return next(e);
   });

@@ -4,19 +4,29 @@ Claude Code mods by [ezoushen](https://github.com/ezoushen) — plugins whose be
 
 | Mod | Requires | Install |
 | --- | --- | --- |
-| [mermaid-pane](mermaid-pane/) | Claude Code ≥ 2.1.287; `mmdc` (mermaid-cli) optional for offline rendering; image mode needs a graphics terminal (kitty/iTerm2/WezTerm/Ghostty) | `/plugin marketplace add ezoushen/claude-mods` then `/plugin install mermaid-pane@claude-mods` |
+| [mermaid-pane](mermaid-pane/) | Claude Code ≥ 2.1.287; renderers optional (`/mermaid setup` installs them); image mode needs a graphics terminal (kitty/iTerm2/WezTerm/Ghostty) | `/plugin marketplace add ezoushen/claude-mods` then `/plugin install mermaid-pane@claude-mods` |
+| [image-preview](image-preview/) | Claude Code ≥ 2.1.287; works on any terminal (draws the filename as alt-text on non-graphic ones) | `/plugin marketplace add ezoushen/claude-mods` then `/plugin install image-preview@claude-mods` |
 
 ## Mods
 
+### image-preview
+
+Renders image paths inline, like the desktop GUI — a thumbnail in the prompt row you sent and in the reply that mentions the path:
+
+- **prompt rows** — an image path in the sent prompt draws an aspect-fill thumbnail (never taller than 10 rows)
+- **reply rows** — a path the model mentions draws the same thumbnail in the reply row
+- `/image <path...>` stores paths, referenced as `[Image #N]`; `/image off` is a complete no-op, `/image list` / `/image clear` manage the gallery
+
+Thumbnails are real PNG files (`sips -Z 800`) stored under `/tmp/image-preview/`; graphics terminals (kitty/Ghostty) paint actual pixels, other terminals draw the file name as alt text.
+
 ### mermaid-pane
 
-Presents ```` ```mermaid ```` blocks from the conversation:
+Renders ```` ```mermaid ```` blocks from the conversation inline, with the chart sitting next to the response that produced it:
 
-- **ascii mode** — each reply's mermaid fence is rewritten in place into rendered ASCII art (the chart sits with the response it belongs to)
-- **image mode** — replies keep their source; the `/mermaid` pane draws real diagram PNGs as native terminal images (local `mmdc` render, mermaid.ink fallback)
-- `/mermaid` opens the session gallery pane · `/mermaid image|ascii` picks the mode · `/mermaid close` closes
-- `[ Open ↗ ]` in the pane opens the full-fidelity SVG in the browser
-- Charts are retained across the session; rendering is aspect-fit with margins and never clips content
+- **ascii mode** — each reply's mermaid fence is rewritten in place into rendered ASCII art
+- **image mode** — replies keep their source; each chart draws as a real diagram PNG (local `mmdc` render, mermaid.ink fallback), degrading to art on text-only terminals
+- `/mermaid ascii|image` picks the mode (remembered across sessions) · bare `/mermaid` reports the current mode and renderer status
+- `/mermaid setup` installs the optional renderers in the background (see the mod's README)
 
 ## Install
 
@@ -40,7 +50,7 @@ claude --plugin-dir ./mermaid-pane
 ## Notes
 
 - [research/](research/) — findings kept while building the mods (e.g. how mermaid rendering works in TUIs).
-- `mmdc` is optional: without it, mermaid-pane falls back to mermaid.ink (network) and ASCII art.
+- Renderers are optional: without them, mermaid-pane still renders (built-in edge art; PNGs via mermaid.ink + curl/sips).
 
 ## License
 
