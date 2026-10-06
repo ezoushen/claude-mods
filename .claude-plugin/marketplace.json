@@ -10,8 +10,8 @@
   "plugins": [
     {
       "name": "mermaid-pane",
-      "description": "Renders mermaid code blocks inline as ASCII art or images; mermaid.ink is opt-in via /mermaid external on.",
-      "version": "0.2.2",
+      "description": "Renders mermaid code blocks inline as ASCII art (termaid) or images; mermaid.ink is opt-in via /mermaid external on.",
+      "version": "0.3.0",
       "source": "./mermaid-pane",
       "author": {
         "name": "ezoushen"

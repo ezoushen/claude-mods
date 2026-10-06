@@ -27,14 +27,14 @@ ASCII mode never leaves the machine. Diagnostics never include diagram source, e
 
 | Renderer | What it improves | Install via `/mermaid setup` |
 | --- | --- | --- |
-| [`mermaid-ascii`](https://github.com/AlexanderGrooff/mermaid-ascii) | Better ASCII art (real graph layout vs the built-in edge list) | **prebuilt release download** — matched to `uname -s`/`uname -m` at install time, dropped into `~/.local/bin`. No compiler, no Python, nothing built from source (unsupported platforms log how to install manually) |
+| [`termaid`](https://github.com/fasouto/termaid) | Better ASCII art across many Mermaid diagram types (flowchart, sequence, class, ER, state, gantt, mindmap, …) vs the built-in edge list | `pip install --user termaid` (Python ≥ 3.9); console script linked into `~/.local/bin` |
 | [`@mermaid-js/mermaid-cli`](https://github.com/mermaid-js/mermaid-cli) (`mmdc`) | Offline PNG rendering (puppeteer fetches a prebuilt Chromium on first render) | `npm install -g @mermaid-js/mermaid-cli`, pinned to the Node major found (12.x needs ≥ 22.13, 11.x ≥ 18.19); nvm PATH handled |
 
-Without them the mod still works everywhere: **edge-list art** (built in, always fits, never clips) for ascii, and — only if you `/mermaid external on` — **mermaid.ink + `curl` + `sips`** for images. `/mermaid setup` detects what's missing, starts the installs detached (so the render hook never blocks on npm), logs to `/tmp/mermaid-pane/setup.log`, and a re-run reports progress. New sessions pick renderers up automatically.
+Without them the mod still works everywhere: **edge-list art** (built in, always fits, never clips) for ascii, and — only if you `/mermaid external on` — **mermaid.ink + `curl` + `sips`** for images. `/mermaid setup` detects what's missing, starts the installs detached (so the render hook never blocks on pip/npm), logs to `/tmp/mermaid-pane/setup.log`, and a re-run reports progress. New sessions pick renderers up automatically.
 
 ## Modes
 
-- **ascii** — tiered mermaid-ascii spacing → built-in edge-list art → the source itself; text wraps, never clips. Always local.
+- **ascii** — termaid (`--width` + compact gaps) → built-in edge-list art → the source itself; text wraps, never clips. Always local.
 - **image** — local `mmdc -s 2` (bounded duration, no network) → optional mermaid.ink (opt-in) → `sips` → PNG, drawn as a native `Image` sized from the SVG's own viewBox when remote sizing is allowed; otherwise a fixed native width. Falls back to ascii art with a short actionable note when a PNG can't be produced. Real pixels need a terminal Claude Code can paint images in (**kitty, Ghostty**); other terminals — including iTerm2/WezTerm — draw the alt-text art instead.
 
 ## Development

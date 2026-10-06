@@ -17,11 +17,19 @@ terminal image protocol: **Kitty Graphics** (`APC ESC_G`; kitty, Ghostty, WezTer
 terminal and a local `mmdc`.
 
 ### 2. ASCII / Unicode art
-[mermaid-ascii](https://github.com/AlexanderGrooff/mermaid-ascii) (Go; also a PyPI wheel with a prebuilt binary;
-web endpoint `https://mermaid-ascii.art` — connection failed during testing 2026-10-05), [termiflow]
-(https://github.com/dnvt/termiflow), [mermaidtui](https://github.com/tariqshams/mermaidtui). Works in any
-terminal, any multiplexer, scrollback-safe. Coverage is a subset (flowcharts, sequence diagrams) though
-mermaid-ascii claims 22 diagram types.
+Native ASCII backends reimplement Mermaid parsers — none track official Mermaid 1:1. Options surveyed:
+
+- [termaid](https://github.com/fasouto/termaid) (Python; 18 diagram types; `pip install termaid`; `--width`
+  auto-fit) — **current mermaid-pane ascii backend**
+- [AlexanderGrooff/mermaid-ascii](https://github.com/AlexanderGrooff/mermaid-ascii) (Go; flowchart, sequence,
+  ER; prebuilt release binary; earlier mermaid-pane backend)
+- [pgavlin/mermaid-ascii](https://github.com/pgavlin/mermaid-ascii) (fork claiming 22 types; no releases as of
+  2026-10)
+- [termiflow](https://github.com/dnvt/termiflow), [mermaidtui](https://github.com/tariqshams/mermaidtui),
+  [beautiful-mermaid](https://github.com/lukilabs/beautiful-mermaid), [merslim](https://www.npmjs.com/package/merslim)
+
+Works in any terminal, any multiplexer, scrollback-safe. For true full Mermaid coverage, use official
+`mmdc`/mermaid.ink (image mode) rather than a native ASCII reimplementation.
 
 ### 3. Service renderers / browser handoff
 [mermaid.ink](https://mermaid.ink) — verified 2026-10-05: `GET /svg/<base64url of {code, mermaid:{theme}}>` →
@@ -60,12 +68,13 @@ Layered, degrade-gracefully:
 **Key E2E constraint:** the verification pane runs under `TERM_PROGRAM=herdr` (text-scraping multiplexer,
 `TERM=xterm-256color`) — inline-image escape sequences will not be verifiable (or may not render at all)
 through `herdr agent read`. The E2E-visible path is Tier 3 text rendering; Tiers 1–2 are enhancements for
-real graphics terminals. mermaid-ascii's HTTP endpoint was down, so Tier 3 uses a built-in minimal
-flowchart→Unicode renderer (nodes + `──▶` edges) rather than an external dependency.
+real graphics terminals. Tier 3 uses termaid when installed, else a built-in minimal flowchart→Unicode
+renderer (nodes + `──▶` edges).
 
 ### Sources
 
-- https://github.com/AlexanderGrooff/mermaid-ascii (CLI/PyPI/web flags verified from README snippets)
+- https://github.com/fasouto/termaid (18 diagram types; `--width` / `--gap` CLI)
+- https://github.com/AlexanderGrooff/mermaid-ascii (earlier backend; flowchart/sequence/ER)
 - https://github.com/zhengbuqian/mermaidcat (mmdc→PNG→IIP/chafa pipeline)
 - https://mermaidkit.github.io/mermkit/ (engine registry: mmdc, ascii, inline images)
 - https://pkg.go.dev/github.com/smford/golang-mermaid (protocol matrix: kitty/iTerm2/sixel)

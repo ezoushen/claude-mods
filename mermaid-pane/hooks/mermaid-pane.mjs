@@ -14,9 +14,9 @@
 // ASCII with a short actionable diagnostic (never logs diagram source or
 // encoded URLs).
 //
-// No-cut strategy (art): tiered mermaid-ascii spacing → built-in edge-list
-// art → the source itself; every Text draws with wrap:'wrap', lines wrap,
-// never clip. PNG path: local mmdc → (opt-in) mermaid.ink → sips → PNG.
+// No-cut strategy (art): termaid (--width + compact gaps) → built-in
+// edge-list art → the source itself; every Text draws with wrap:'wrap',
+// lines wrap, never clip. PNG path: local mmdc → (opt-in) mermaid.ink → sips.
 
 const MODE = { plugin: "mermaid-pane", key: "mode" }; // read while drawing: a set redraws the drawer
 const PNG_DIR = "/tmp/mermaid-pane";
@@ -146,11 +146,11 @@ async function probeSh($, sh) {
 
 async function probeTool($) {
   if (probedTool !== undefined) return probedTool;
-  probedTool = await probeSh($, whichSh("mermaid-ascii"));
+  probedTool = await probeSh($, whichSh("termaid"));
   return probedTool;
 }
 
-// --- tier 1: mermaid-ascii ---------------------------------------------------
+// --- tier 1: termaid (multi-type Mermaid → Unicode/ASCII art) ----------------
 
 function artWidth(art) {
   return Math.max(0, ...art.split("\n").map((l) => l.length));
@@ -163,10 +163,14 @@ async function asciiFor($, code, budget) {
   const tool = await probeTool($);
   let art = null;
   if (tool) {
-    // Tiered spacing: default → compact → tightest; first render that fits wins.
-    const tiers = [[], ["-x", "2", "-y", "2", "-p", "1"], ["-x", "1", "-y", "1", "-p", "0"]];
+    // termaid auto-compacts to --width; tighter gaps if a render still overflows.
+    const tiers = [
+      ["--width", String(budget)],
+      ["--width", String(budget), "--gap", "2"],
+      ["--width", String(budget), "--gap", "1", "--padding-x", "1", "--padding-y", "1"],
+    ];
     for (const flags of tiers) {
-      const sh = `printf '%s' ${shellQuote(code)} | ${tool} -f - ${flags.join(" ")} 2>/dev/null`;
+      const sh = `printf '%s' ${shellQuote(code)} | ${shellQuote(tool)} ${flags.join(" ")} 2>/dev/null`;
       try {
         const { exitCode, stdout } = await run($, sh);
         if ((exitCode ?? 1) === 0 && stdout?.trim()) {
@@ -186,8 +190,8 @@ async function asciiFor($, code, budget) {
 
 // --- tier 2: built-in edge-list art (always fits; lines wrap, never cut) -----
 
-// Normalize: the header ("flowchart LR") must open its own line for
-// mermaid-ascii and for line-based edge parsing; replies often inline it.
+// Normalize: the header ("flowchart LR") must open its own line for termaid
+// and for line-based edge parsing; replies often inline it.
 function normalize(code) {
   return code.replace(/^(flowchart|graph)\s+(TD|TB|LR|RL|BT)\b[: ]*/i, "$1 $2\n").trim();
 }
@@ -527,23 +531,26 @@ async function renderAssistant($, e, next) {
 // Fresh (non-memoized) probe — setup must see installs made this session.
 const probeFresh = ($, bin, prelude = "") => probeSh($, whichSh(bin, prelude));
 
-// Prebuilt release binaries only — no compilers, no source builds. The
-// platform pair is read from uname at install time (Darwin/Linux, arm64,
-// x86_64, i386); anything else logs how to install manually. Lands in
-// ~/.local/bin, created on demand. curl + tar are the only requirements
-// (curl is already a hard dependency of the image fallback path).
-const ASCII_RELEASE_URL =
-  "https://github.com/AlexanderGrooff/mermaid-ascii/releases/latest/download";
+// termaid is a pure-Python package on PyPI (zero native deps). Install with
+// pip --user, then symlink the console script into ~/.local/bin so the probe
+// path (PATH, then ~/.local/bin) finds it even when the user site scripts dir
+// is not on PATH (common on macOS Homebrew/Python.org installs).
 const ASCII_INSTALL_SH =
-  `set -e; OS=$(uname -s); A=$(uname -m); ` +
-  `case "$OS/$A" in ` +
-  `Darwin/arm64) E=Darwin_arm64 ;; Darwin/x86_64) E=Darwin_x86_64 ;; ` +
-  `Linux/x86_64) E=Linux_x86_64 ;; Linux/aarch64) E=Linux_arm64 ;; ` +
-  `Linux/i?86) E=Linux_i386 ;; ` +
-  `*) echo "no prebuilt mermaid-ascii for $OS/$A — see github.com/AlexanderGrooff/mermaid-ascii/releases" >&2; exit 1 ;; esac; ` +
-  `D=$(mktemp -d); curl -sfL "${ASCII_RELEASE_URL}/mermaid-ascii_$E.tar.gz" | tar -xz -C "$D"; ` +
-  `mkdir -p "$HOME/.local/bin"; cp "$D/mermaid-ascii" "$HOME/.local/bin/mermaid-ascii" && chmod +x "$HOME/.local/bin/mermaid-ascii"; rm -rf "$D"; ` +
-  `echo "installed $HOME/.local/bin/mermaid-ascii ($E)"`;
+  `set -e; ` +
+  `command -v python3 >/dev/null 2>&1 || { echo "python3 not found — install Python 3.9+ first" >&2; exit 1; }; ` +
+  `python3 -m pip install --user --upgrade 'termaid>=0.9.0' || python3 -m pip install --user --upgrade termaid; ` +
+  `mkdir -p "$HOME/.local/bin"; ` +
+  `T=""; ` +
+  `if command -v termaid >/dev/null 2>&1; then T=$(command -v termaid); ` +
+  `elif [ -x "$HOME/.local/bin/termaid" ]; then T="$HOME/.local/bin/termaid"; ` +
+  `else ` +
+  `UB=$(python3 -c 'import os,site; print(os.path.join(site.USER_BASE,"bin"))' 2>/dev/null || true); ` +
+  `SB=$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts") or "")' 2>/dev/null || true); ` +
+  `for d in "$HOME/.local/bin" "$UB" "$SB"; do [ -n "$d" ] && [ -x "$d/termaid" ] && T="$d/termaid" && break; done; ` +
+  `fi; ` +
+  `[ -n "$T" ] || { echo "termaid installed but console script not found" >&2; exit 1; }; ` +
+  `[ "$T" = "$HOME/.local/bin/termaid" ] || ln -sf "$T" "$HOME/.local/bin/termaid"; ` +
+  `echo "installed $HOME/.local/bin/termaid ← $T"`;
 
 // mermaid-cli ships prebuilt on npm; puppeteer fetches a prebuilt Chromium on
 // first render. The spec is pinned to the Node major that will run it
@@ -613,15 +620,19 @@ export function register(on) {
       if (/^setup/.test(arg)) {
         const lines = [];
         const starting = [];
-        const ascii = await probeFresh($, "mermaid-ascii");
+        const ascii = await probeFresh($, "termaid");
         const mmdc = await probeFresh($, "mmdc", NVM_PATH_PRELUDE);
-        if (ascii) lines.push("✓ mermaid-ascii (better ASCII art)");
+        if (ascii) lines.push("✓ termaid (multi-type ASCII art)");
         if (mmdc) lines.push("✓ mermaid-cli (offline PNG rendering)");
         for (const [key, have, label] of [
-          ["ascii", ascii, "mermaid-ascii"],
+          ["ascii", ascii, "termaid"],
           ["mmdc", mmdc, "mermaid-cli (mmdc)"],
         ]) {
           if (have) continue;
+          if (key === "ascii" && !(await probeFresh($, "python3"))) {
+            lines.push(`✗ ${label} — install it manually (needs Python 3.9+ and pip)`);
+            continue;
+          }
           if (key === "mmdc" && !(await probeFresh($, "npm", NVM_PATH_PRELUDE))) {
             lines.push(`✗ ${label} — install it manually (needs Node + npm)`);
             continue;
@@ -644,7 +655,7 @@ export function register(on) {
             `\nImage mode stays local unless you /mermaid external on (sends full diagram source to mermaid.ink).`;
         } else if (lines.every((l) => l.startsWith("✓"))) {
           text =
-            "Everything is installed — ascii art via mermaid-ascii, images via mermaid-cli." +
+            "Everything is installed — ascii art via termaid, images via mermaid-cli." +
             "\nRemote mermaid.ink fallback is opt-in: /mermaid external on (sends full diagram source; persists).";
         } else {
           text = `Renderer status:\n${lines.join("\n")}`;
@@ -695,12 +706,12 @@ export function register(on) {
       }
       const mode = await getMode($);
       const external = await getExternalAllowed($);
-      const ascii = await probeFresh($, "mermaid-ascii");
+      const ascii = await probeFresh($, "termaid");
       const mmdc = await probeFresh($, "mmdc", NVM_PATH_PRELUDE);
       let text = `${mode} mode — external ${external ? "ON" : "OFF"} — /mermaid ${mode === "image" ? "ascii" : "image"} to switch.`;
       if (!ascii || !mmdc) {
         const parts = [];
-        parts.push(`mermaid-ascii ${ascii ? "✓" : "✗"}`);
+        parts.push(`termaid ${ascii ? "✓" : "✗"}`);
         parts.push(`mermaid-cli ${mmdc ? "✓" : "✗"}`);
         text += `\nrenderers: ${parts.join(" · ")} — /mermaid setup installs missing ones`;
       }
