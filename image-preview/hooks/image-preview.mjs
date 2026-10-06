@@ -31,9 +31,6 @@ const PATH_RE =
   /(?:^|[\s"'([,{])([^\s"'<>]+?\.(?:png|jpg|jpeg|gif|webp|bmp|tif(?:f)?|heic|heif|ico|svg))(?:\?[^#\s"')]*)?(?:#[^\s"')]*)?(?=[\s"')\]}]|$)/gi;
 // An [Image #N] reference token; group 1 is its number.
 const REF_RE = /\[Image\s*#(\d+)\s*\]/gi;
-// Cheap pre-check so rows without references skip everything.
-const HAS_IMAGE = /\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic|heif|ico|svg)|\[Image\s*#\d+\]/i;
-
 const imgCache = new Map(); // resolved path -> { file, w, h } | "fail"
 
 function run($, cmd) {
@@ -51,9 +48,11 @@ function basename(p) {
   return m ? m[1] : clean;
 }
 
-// cwd-join for relative references, keeping .. intact.
-function join(cwd, t) {
-  const parts = `${String(cwd ?? "").replace(/\/+$/, "")}/${String(t).replace(/^\/+/, "")}`.split("/");
+// Absolute, or cwd-joined for relative references (.. stays intact).
+function resolvePath(token, cwd) {
+  const t = token.trim();
+  if (t.startsWith("/")) return t;
+  const parts = `${String(cwd ?? "").replace(/\/+$/, "")}/${t.replace(/^\/+/, "")}`.split("/");
   const out = [];
   for (const p of parts) {
     if (p === "" || p === ".") continue;
@@ -61,11 +60,6 @@ function join(cwd, t) {
     else out.push(p);
   }
   return `/${out.join("/")}`;
-}
-
-function resolvePath(token, cwd) {
-  const t = token.trim();
-  return t.startsWith("/") ? t : join(cwd, t);
 }
 
 function hash(s) {
@@ -128,15 +122,9 @@ function imageRefs(text, cwd) {
   }
   REF_RE.lastIndex = 0;
   while ((m = REF_RE.exec(text))) {
-    refs.push({ abs: null, label: `[Image #${m[1]}]` });
+    refs.push({ abs: null, num: parseInt(m[1], 10), label: `[Image #${m[1]}]` });
   }
   return refs;
-}
-
-// Resolve an [Image #N] label against the gallery; returns its path or null.
-function galleryPath(gallery, label) {
-  const m = /\[Image #(\d+)\]/.exec(label);
-  return m ? gallery?.[parseInt(m[1], 10) - 1] ?? null : null;
 }
 
 // One thumbnail per resolvable reference, in document order.
@@ -145,7 +133,7 @@ async function collectThumbs($, text, C) {
   const gallery = await loadGallery($);
   const nodes = [];
   for (const ref of imageRefs(text, cwd)) {
-    const path = ref.abs ?? galleryPath(gallery, ref.label);
+    const path = ref.abs ?? gallery[ref.num - 1] ?? null;
     if (!path) continue;
     const decoded = await decode($, path);
     if (!decoded) continue;
@@ -191,7 +179,7 @@ async function loadGallery($) {
 async function renderRow($, e, next) {
   const props = e?.props ?? {};
   const text = props.text;
-  if (typeof text !== "string" || !HAS_IMAGE.test(text)) return next(e);
+  if (typeof text !== "string") return next(e);
 
   const maxColumns = e?.viewport?.columns ?? props.bodyColumns ?? 60;
   const C = { ...$.ui.resolve(e), maxColumns };

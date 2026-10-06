@@ -6,11 +6,9 @@ type AnyHook = (...args: any[]) => unknown;
 const mem: Record<string, unknown> = {};
 const WORK = "/work";
 
-// Build a world where any `*.png`/`*.jpg` path is a real file, `sips`
-// converts it to 400x300, and `$.fs.read` yields some base64 bytes.
-// `term` decides whether the terminal can paint Image pixels (kitty-like) or
-// gets the ASCII fallback (plain xterm).
-function stubWorld(on: (event: string, hook: AnyHook) => void, term = "xterm-ghostty") {
+// Build a world where any `*.png`/`*.jpg` path is a real file and `sips`
+// converts it to 400x300.
+function stubWorld(on: (event: string, hook: AnyHook) => void) {
   for (const k of Object.keys(mem)) delete mem[k]; // fresh state per test
   on("session.start", () => ({ cwd: WORK }));
   on("session.messages", () => ({ value: [] }));
@@ -18,7 +16,7 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, term = "xterm-gho
 
   on("state.get", (_$: unknown, e: { plugin: string; key: string }) => {
     const k = `${e.plugin}:${e.key}`;
-    if (!(k in mem)) mem[k] = { state: { gallery: [], band: { draft: "", images: [] } } };
+    if (!(k in mem)) mem[k] = { state: { gallery: [] } };
     // Envelope { value: ... } + real result { value, version }: $.state.get
     // resolves to the inner object, whose .value is the stored state.
     return { value: { value: mem[k], version: 0 } };
@@ -31,24 +29,8 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, term = "xterm-gho
   on("command.register", () => ({ value: { command: "image" } }));
   on("ui.invalidate", () => ({ value: {} }));
 
-  on("fs.stat", (_$: unknown, path: string) => {
-    if (/\.(png|jpg|jpeg|gif|webp|bmp|tif(f)?|heic|heif|ico|svg)$/i.test(String(path))) {
-      return { value: { kind: "file", size: 4096, mtimeMs: 1_700_000_000_000 } };
-    }
-    const err: any = new Error(`ENOENT: ${path}`);
-    err.code = "ENOENT";
-    throw err;
-  });
-  on("fs.read", (_$: unknown, e: { path: string; as?: string }) => {
-    // The engine reads an Image's { file, format: "png" } source by name; the
-    // bytes answer stays valid PNG for surfaces that want the payload.
-    if (e?.as === "bytes") return { value: { base64: PNG_B64 } };
-    return { value: "" };
-  });
-
   on("process.run", (_$: unknown, cmd: unknown) => {
     const s = JSON.stringify(cmd);
-    if (/TERM/.test(s)) return { value: { exitCode: 0, stdout: term } };
     if (s.indexOf("sips") >= 0) {
       return { value: { exitCode: 0, stdout: "pixelWidth: 400\npixelHeight: 300" } };
     }
@@ -106,7 +88,6 @@ describe("image-preview", () => {
     // Aspect-fill, never stretched: the block's cell aspect matches the
     // picture's pixel aspect through the 16x34px cell (400x300 -> 2.833 c/r).
     const drawn = JSON.parse(tree);
-    const img = JSON.stringify(drawn).includes('"type":"Image"') ? drawn : null;
     const findImg = (n: any): any => {
       if (n?.type === "Image") return n;
       for (const c of n?.children ?? []) { const f = findImg(c); if (f) return f; }

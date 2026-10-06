@@ -11,7 +11,7 @@ Render image paths inline in Claude Code, like the desktop GUI app.
 ## How images render
 
 Every thumbnail is an `Image` element sourcing a real PNG file
-(`sips -z 800 800` → `/tmp/image-preview/<hash>.png`), the same way the
+(`sips -Z 800` → `/tmp/image-preview/<hash>.png`, aspect preserved), the same way the
 `mermaid-pane` mod presents its diagrams:
 
 - **kitty / Ghostty**: the engine paints actual pixels.
