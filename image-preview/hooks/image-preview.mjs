@@ -81,8 +81,10 @@ async function decode($, absPath) {
   let result = null;
   try {
     const png = `${TMP_DIR}/${hash(absPath)}.png`;
+    // -Z bounds the longest side and preserves aspect (-z would resample to an
+    // exact WxH box and distort every picture into a square).
     const sh =
-      `mkdir -p ${quote(TMP_DIR)} && sips ${quote(absPath)} -z 800 800 --out ${quote(png)} 2>/dev/null && ` +
+      `mkdir -p ${quote(TMP_DIR)} && sips ${quote(absPath)} -Z 800 --out ${quote(png)} 2>/dev/null && ` +
       `sips -g pixelWidth -g pixelHeight ${quote(png)}`;
     const r = await run($, sh);
     const w = /pixelWidth:\s*(\d+)/.exec(r?.stdout ?? "");
