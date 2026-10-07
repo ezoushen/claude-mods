@@ -376,7 +376,7 @@ describe("mermaid-pane", () => {
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
 
     const ui = await mountRow($, REPLY);
-    expect(await ui.find({ type: "Text", text: /intro line/ })).toBeDefined();
+    expect(await ui.find({ type: "Markdown", text: /intro line/ })).toBeDefined();
     expect(await ui.find({ type: "Image" })).toBeDefined();
     expect(inkRequestCount()).toBe(0);
   });
@@ -547,6 +547,22 @@ describe("mermaid-pane", () => {
     // the default 30 s would kill mmdc before `timeout 45` can report it
     const ms = Number(/"timeoutMs":(\d+)/.exec(renderRuns[0] ?? "")?.[1]);
     expect(ms).toBeGreaterThan(45_000);
+  });
+
+  test("image mode draws the reply's prose as markdown (tables, code spans)", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localPng: true, present: ["mmdc"] });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const table = "| Caller | Hot Patch |\n| --- | --- |\n| `L10n.*` | ✅ |";
+    const ui = await mountRow($, `${table}\n\n${REPLY}\n\nafter the chart`);
+    expect(await ui.find({ type: "Markdown", text: /\| Caller \| Hot Patch \|/ })).toBeDefined();
+    expect(await ui.find({ type: "Markdown", text: /after the chart/ })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: /\| Caller/ })).not.toBeDefined();
+    expect(await ui.find({ type: "Image" })).toBeDefined();
   });
 
   test("explicit opt-in enables mermaid.ink fallback", async ($, on) => {
