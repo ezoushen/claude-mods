@@ -19,7 +19,35 @@
 // lines wrap, never clip. PNG path: local mmdc → (opt-in) mermaid.ink → sips.
 
 const MODE = { plugin: "mermaid-pane", key: "mode" }; // read while drawing: a set redraws the drawer
-const PNG_DIR = "/tmp/mermaid-pane";
+// Rendered PNGs, .mmd sources and install scripts live in a per-user dir,
+// "$HOME/.cache/mermaid-pane" — never shared /tmp, where another local user
+// could create the dir first (plant a puppeteer.json whose executablePath
+// runs, swap an install script, or just block rendering). Resolved once.
+let pngDirMemo; // undefined = not resolved this load
+
+async function pngDir($) {
+  if (pngDirMemo) return pngDirMemo;
+  const r = await run($, `echo "home:$HOME"`); // a cut throws: caller treats it as cut
+  const home = /^home:(\/.+)$/m.exec(r.stdout ?? "")?.[1];
+  if (!home) return null;
+  pngDirMemo = `${home}/.cache/mermaid-pane`;
+  return pngDirMemo;
+}
+
+// Defence in depth: use the dir only once it is ours, not a symlink, private.
+function dirGuardSh(dir) {
+  const d = shellQuote(dir);
+  return (
+    `umask 077; mkdir -p ${d} 2>/dev/null; ` +
+    `{ [ ! -L ${d} ] && [ -O ${d} ] && chmod 700 ${d}; } || ` +
+    `{ echo "mermaid-pane: ${dir.replace(/[^\w./-]/g, "?")} is not this user's; not using it" >&2; exit 97; }`
+  );
+}
+
+// Every command starts in / — never the session's directory, a repo that may
+// be untrusted: bun reads its bunfig.toml (a `preload` runs code), puppeteer
+// its .puppeteerrc.cjs. All paths the mod passes are absolute.
+const SAFE_CWD = "/";
 const LOCAL_RENDER_SECS = 45; // bound local mmdc so a hung Chromium cannot stall redraws
 const RETRY_MS = 60000; // a failed chart renders again after this long
 
@@ -120,7 +148,7 @@ async function setExternalAllowed($, allowed) {
 }
 
 async function run($, cmd, init) {
-  const r = await $.process.run(["/bin/sh", "-c", cmd], init);
+  const r = await $.process.run(["/bin/sh", "-c", cmd], { cwd: SAFE_CWD, ...init });
   return r?.value ?? r ?? {};
 }
 
@@ -409,7 +437,16 @@ async function renderPng($, code, base, signal) {
   if (failed && (!now || now - failed.at < RETRY_MS)) return null;
   let result = null;
   let failKind = "failed";
-  const png = `${PNG_DIR}/${base}.png`;
+  let dir;
+  try {
+    dir = await pngDir($);
+  } catch (err) {
+    if (isAborted(err, signal)) return ABORTED;
+    dir = null;
+  }
+  if (!dir) return null; // no private dir: nothing is written anywhere
+  const png = `${dir}/${base}.png`;
+  const q = (p) => shellQuote(p);
   const mmdc = await mmdcPath($);
   if (mmdc === undefined) return ABORTED; // the probe was cut
   if (!mmdc) {
@@ -421,14 +458,14 @@ async function renderPng($, code, base, signal) {
     try {
       const sh =
         `${NVM_PATH_PRELUDE}command -v node >/dev/null 2>&1 || exit 0; ` +
-        `mkdir -p '${PNG_DIR}' && printf '%s' ${shellQuote(code)} > '${PNG_DIR}/${base}.mmd' && ` +
-        `P=""; [ -f '${PNG_DIR}/puppeteer.json' ] && P="-p ${PNG_DIR}/puppeteer.json"; ` +
-        `[ -f '${PNG_DIR}/puppeteer.json' ] || for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "/Applications/Chromium.app/Contents/MacOS/Chromium" "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"; do [ -x "$c" ] && printf '{"executablePath":"%s"}' "$c" > '${PNG_DIR}/puppeteer.json' && P="-p ${PNG_DIR}/puppeteer.json" && break; done; ` +
+        `${dirGuardSh(dir)}; printf '%s' ${shellQuote(code)} > ${q(`${dir}/${base}.mmd`)} && ` +
+        `P=""; [ -f ${q(`${dir}/puppeteer.json`)} ] && P=${q(`${dir}/puppeteer.json`)}; ` +
+        `[ -f ${q(`${dir}/puppeteer.json`)} ] || for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "/Applications/Chromium.app/Contents/MacOS/Chromium" "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"; do [ -x "$c" ] && printf '{"executablePath":"%s"}' "$c" > ${q(`${dir}/puppeteer.json`)} && P=${q(`${dir}/puppeteer.json`)} && break; done; ` +
         `if command -v timeout >/dev/null 2>&1; then ` +
-        `timeout ${LOCAL_RENDER_SECS} '${mmdc}' $P -i '${PNG_DIR}/${base}.mmd' -o '${png}' -b white -s 2 >/dev/null 2>&1; ec=$?; ` +
+        `timeout ${LOCAL_RENDER_SECS} '${mmdc}' \${P:+-p "$P"} -i ${q(`${dir}/${base}.mmd`)} -o ${q(png)} -b white -s 2 >/dev/null 2>&1; ec=$?; ` +
         `[ "$ec" -eq 124 ] && exit 124; [ "$ec" -eq 0 ] || exit "$ec"; ` +
-        `else '${mmdc}' $P -i '${PNG_DIR}/${base}.mmd' -o '${png}' -b white -s 2 >/dev/null 2>&1 || exit $?; fi; ` +
-        `sips -g pixelWidth -g pixelHeight '${png}'`;
+        `else '${mmdc}' \${P:+-p "$P"} -i ${q(`${dir}/${base}.mmd`)} -o ${q(png)} -b white -s 2 >/dev/null 2>&1 || exit $?; fi; ` +
+        `sips -g pixelWidth -g pixelHeight ${q(png)}`;
       // $.process.run kills at 30 s by default — before `timeout` could report.
       const { exitCode, stdout } = await run($, sh, { timeoutMs: (LOCAL_RENDER_SECS + 15) * 1000 });
       if ((exitCode ?? 1) === 124) {
@@ -457,14 +494,14 @@ async function renderPng($, code, base, signal) {
     // Re-check permission immediately before sending so revoke stops in-flight work.
     if (await getExternalAllowed($)) {
       try {
-        const jpg = `${PNG_DIR}/${base}.jpg`;
+        const jpg = `${dir}/${base}.jpg`;
         const targetPx = 2400;
         // Permission still holds at the moment of the request construction.
         if (await getExternalAllowed($)) {
           const sh =
-            `mkdir -p '${PNG_DIR}' && curl -sfL --max-time 25 '${inkUrl(code, "img")}?type=png&width=${targetPx}' -o '${jpg}'` +
-            ` && sips -s format png '${jpg}' --out '${png}' >/dev/null 2>&1` +
-            ` && sips -g pixelWidth -g pixelHeight '${png}'`;
+            `${dirGuardSh(dir)}; curl -sfL --max-time 25 '${inkUrl(code, "img")}?type=png&width=${targetPx}' -o ${q(jpg)}` +
+            ` && sips -s format png ${q(jpg)} --out ${q(png)} >/dev/null 2>&1` +
+            ` && sips -g pixelWidth -g pixelHeight ${q(png)}`;
           const { exitCode, stdout } = await run($, sh);
           const w = /pixelWidth: (\d+)/.exec(stdout ?? "")?.[1];
           const h = /pixelHeight: (\d+)/.exec(stdout ?? "")?.[1];
@@ -545,7 +582,7 @@ function openButton($, Button, file, key) {
     onPress: async () => {
       let ok = false;
       try {
-        const r = await $.process.run(["open", file]);
+        const r = await $.process.run(["open", file], { cwd: SAFE_CWD });
         ok = ((r?.value ?? r)?.exitCode ?? 1) === 0;
       } catch {
         ok = false;
@@ -747,12 +784,15 @@ const BM_TOOLCHAIN_SH =
   `else ${NVM_PATH_PRELUDE}command -v npm; fi`;
 
 // Installs run detached (nohup) so the hook never blocks on npm/pip; the log
-// lands in PNG_DIR and a re-run of /mermaid setup reports progress.
+// lands in the private dir and a re-run of /mermaid setup reports progress.
 async function startInstall($, key, sh) {
   try {
+    const dir = await pngDir($);
+    if (!dir) return false;
+    const script = shellQuote(`${dir}/install-${key}.sh`);
     const r = await run(
       $,
-      `mkdir -p '${PNG_DIR}' && printf '%s' ${shellQuote(sh)} > '${PNG_DIR}/install-${key}.sh' && nohup sh '${PNG_DIR}/install-${key}.sh' >> '${PNG_DIR}/setup.log' 2>&1 & echo started`
+      `${dirGuardSh(dir)}; printf '%s' ${shellQuote(sh)} > ${script} && nohup sh ${script} >> ${shellQuote(`${dir}/setup.log`)} 2>&1 & echo started`
     );
     return /started/.test(r.stdout ?? "");
   } catch {
@@ -845,7 +885,7 @@ export function register(on) {
         if (starting.length) {
           const blocked = lines.filter((l) => l.startsWith("✗"));
           text =
-            `Installing ${starting.join(", ")} in the background (log: ${PNG_DIR}/setup.log).` +
+            `Installing ${starting.join(", ")} in the background (log: ${pngDirMemo ?? "~/.cache/mermaid-pane"}/setup.log).` +
             (blocked.length ? `\n${blocked.join("\n")}` : "") +
             `\nRe-run /mermaid setup to check; once it reports them, charts use them right away.` +
             `\nImage mode stays local unless you /mermaid external on (sends full diagram source to mermaid.ink).`;

@@ -1,6 +1,6 @@
 {
   "name": "mermaid-pane",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Renders mermaid code blocks inline as ASCII art (beautiful-mermaid, termaid) or images with an open-full-size button; /mermaid switches modes; mermaid.ink is opt-in via /mermaid external on.",
   "author": { "name": "ezou" },
   "types": "./types/index.d.ts"

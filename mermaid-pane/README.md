@@ -31,7 +31,7 @@ ASCII mode never leaves the machine. Diagnostics never include diagram source, e
 | [`termaid`](https://github.com/fasouto/termaid) | Better ASCII art across many Mermaid diagram types (flowchart, sequence, class, ER, state, gantt, mindmap, …) vs the built-in edge list | `pip install --user termaid` (Python ≥ 3.9); console script linked into `~/.local/bin` |
 | [`@mermaid-js/mermaid-cli`](https://github.com/mermaid-js/mermaid-cli) (`mmdc`) | Offline PNG rendering (puppeteer fetches a prebuilt Chromium on first render) | `npm install -g @mermaid-js/mermaid-cli`, pinned to the Node major found (12.x needs ≥ 22.13, 11.x ≥ 18.19); nvm PATH handled |
 
-Without them the mod still works everywhere: **edge-list art** (built in, always fits, never clips) for ascii, and — only if you `/mermaid external on` — **mermaid.ink + `curl` + `sips`** for images. `/mermaid setup` detects what's missing, starts the installs detached (so the render hook never blocks on pip/npm), logs to `/tmp/mermaid-pane/setup.log`, and a re-run reports progress and starts using what finished installing.
+Without them the mod still works everywhere: **edge-list art** (built in, always fits, never clips) for ascii, and — only if you `/mermaid external on` — **mermaid.ink + `curl` + `sips`** for images. `/mermaid setup` detects what's missing, starts the installs detached (so the render hook never blocks on pip/npm), logs to `~/.cache/mermaid-pane/setup.log`, and a re-run reports progress and starts using what finished installing.
 
 ## Modes
 
