@@ -25,6 +25,10 @@ type AnyHook = (...args: any[]) => unknown;
 let setupRuns: string[] = [];
 // Every process.run payload, for asserting zero mermaid.ink traffic.
 let processRuns: string[] = [];
+// Local mmdc render payloads (not probes), for counting renders.
+let renderRuns: string[] = [];
+// termaid render payloads.
+let termaidRuns: string[] = [];
 
 type StubOpts = {
   png?: boolean;
@@ -39,6 +43,18 @@ type StubOpts = {
   localBadMeta?: boolean;
   /** Remote curl/sips fails even when external is on. */
   remoteFail?: boolean;
+  /** The first N local renders are cut mid-run, as a superseded draw's are. */
+  abortRenders?: number;
+  /** The first `times` commands matching `match` are cut mid-run. */
+  cut?: { match: (s: string) => boolean; times: number };
+  /** The mmdc probe and each local render take this long (real time). */
+  slowRenderMs?: number;
+  /** Local renders are killed by $.process.run's own timeout. */
+  runTimeout?: boolean;
+  /** Local renders of a chart holding this text exit nonzero. */
+  failMarker?: string;
+  /** What termaid prints for every chart (it must be present). */
+  termaidArt?: string;
 };
 
 function isInkRequest(s: string) {
@@ -48,6 +64,8 @@ function isInkRequest(s: string) {
 function stubWorld(on: (event: string, hook: AnyHook) => void, opts: StubOpts = {}) {
   setupRuns = [];
   processRuns = [];
+  renderRuns = [];
+  termaidRuns = [];
   on("session.start", () => ({ cwd: "/work" }));
   on("session.messages", () => ({ value: [] }));
   on("state.get", (_$: unknown, e: { plugin: string; key: string }) => {
@@ -65,10 +83,38 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, opts: StubOpts = 
     return { value: undefined };
   });
   on("command.register", () => ({ value: { command: "mermaid" } }));
-  on("ui.invalidate", () => ({ value: {} }));
+  on("ui.invalidate", (_$: unknown, e: unknown, next: (e: unknown) => unknown) => next(e));
+  // real-time sleep: a draw waiting on a shared render bounds its wait with it
+  on("clock.sleep", (_$: unknown, e: { ms: number }) => new Promise((resolve) => setTimeout(() => resolve({ value: undefined }), e.ms)));
   on("process.run", (_$: unknown, cmd: unknown) => {
     const s = JSON.stringify(cmd);
     processRuns.push(s);
+    if (opts.cut && opts.cut.times > 0 && opts.cut.match(s)) {
+      opts.cut.times--;
+      return { deny: "aborted" };
+    }
+    if (s.includes("mmdc") && s.includes("-i ")) {
+      renderRuns.push(s);
+      if (renderRuns.length <= (opts.abortRenders ?? 0)) {
+        // rejects the call as the host cuts a superseded draw's command
+        return { deny: "aborted" };
+      }
+      if (opts.slowRenderMs) {
+        const done = { value: { exitCode: 0, stdout: "pixelWidth: 876\npixelHeight: 196" } };
+        return new Promise((resolve) => setTimeout(() => resolve(done), opts.slowRenderMs));
+      }
+      if (opts.runTimeout) {
+        // the host's wording when timeoutMs runs out
+        return { deny: "aborted: still running after 60000ms" };
+      }
+      if (opts.failMarker && s.includes(opts.failMarker)) {
+        return { value: { exitCode: 1, stdout: "", stderr: "boom" } };
+      }
+    }
+    if (opts.termaidArt !== undefined && s.includes("termaid") && s.includes("--width")) {
+      termaidRuns.push(s);
+      return { value: { exitCode: 0, stdout: opts.termaidArt } };
+    }
     if (s.includes("nohup")) {
       setupRuns.push(s);
       return { value: { exitCode: 0, stdout: "started" } };
@@ -89,12 +135,14 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, opts: StubOpts = 
     if (s.includes("mmdc") && !s.includes("-i ") && !s.includes("timeout")) {
       // whichSh("mmdc") probe
       const present = (opts.present ?? []).includes("mmdc") || opts.localPng || opts.localFail || opts.localTimeout || opts.localBadMeta;
-      return {
+      const probe = {
         value: {
           exitCode: present ? 0 : 1,
           stdout: present ? "/usr/bin/mmdc" : "",
         },
       };
+      if (opts.slowRenderMs) return new Promise((resolve) => setTimeout(() => resolve(probe), opts.slowRenderMs));
+      return probe;
     }
     if (s.includes("mermaid.ink") || (s.includes("curl") && s.includes("mermaid"))) {
       if (opts.remoteFail) return { value: { exitCode: 1, stdout: "", stderr: "fail" } };
@@ -205,6 +253,45 @@ describe("mermaid-pane", () => {
     expect(inkRequestCount()).toBe(0);
   });
 
+  test("termaid art wider than the reply falls back to edge art after one try", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    // termaid already compacts to --width; what still overflows cannot be fixed by retrying
+    stubWorld(on, { present: ["termaid"], termaidArt: "─".repeat(400) });
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY_EDGES);
+    expect(await ui.find({ type: "Text", text: /P\[Phone\] ──▶ W\[WiFi Router\]/ })).toBeDefined();
+    expect(termaidRuns.length).toBe(1);
+  });
+
+  test("edge art shows <br/> line breaks in labels as spaces", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on); // no termaid → built-in edge art
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, "```mermaid\nflowchart LR\n  A[Hot Patch feed<br/>per locale] -->|that locale,<br>then refresh| B[End]\n```");
+    expect(await ui.find({ type: "Text", text: /A\[Hot Patch feed per locale\] ──▶ B\[End\] \|that locale, then refresh\|/ })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: /<br/ })).not.toBeDefined();
+  });
+
+  for (const [what, match] of [
+    ["probe", (s: string) => s.includes("command -v termaid")],
+    ["run", (s: string) => s.includes("termaid") && s.includes("--width")],
+  ] as const) {
+    test(`a cut termaid ${what} does not pin a chart to edge art`, async ($, on) => {
+      resetMem();
+      echoRow(on);
+      stubWorld(on, { present: ["termaid"], termaidArt: "[TERMAID ART]", cut: { match, times: 1 } });
+      await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+      const ui = await mountRow($, REPLY_EDGES);
+      await ui.redraw();
+      expect(await ui.find({ type: "Text", text: /\[TERMAID ART\]/ })).toBeDefined();
+    });
+  }
+
   test("rows without mermaid blocks pass through untouched", async ($, on) => {
     resetMem();
     echoRow(on);
@@ -294,6 +381,174 @@ describe("mermaid-pane", () => {
     expect(inkRequestCount()).toBe(0);
   });
 
+  test("a local render cut by a superseded draw does not poison later draws", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localPng: true, present: ["mmdc"], abortRenders: 1 });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY);
+    // the cut draw is not a failure: no failure note
+    expect(await ui.find({ type: "Text", text: /render failed/ })).not.toBeDefined();
+    await ui.redraw();
+    expect(await ui.find({ type: "Image" })).toBeDefined();
+    expect(renderRuns.length).toBe(2);
+  });
+
+  test("overlapping draws of one chart share a single local render", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localPng: true, present: ["mmdc"] });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const [a, b] = await Promise.all([mountRow($, REPLY), mountRow($, REPLY)]);
+    expect(await a.find({ type: "Image" })).toBeDefined();
+    expect(await b.find({ type: "Image" })).toBeDefined();
+    expect(renderRuns.length).toBe(1);
+  });
+
+  test("a draw waiting on a render that gets cut renders for itself", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localPng: true, present: ["mmdc"], abortRenders: 1 });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const [cut, waiting] = await Promise.all([mountRow($, REPLY), mountRow($, REPLY)]);
+    expect(await waiting.find({ type: "Image" })).toBeDefined();
+    expect(await cut.find({ type: "Text", text: /render failed/ })).not.toBeDefined();
+    expect(renderRuns.length).toBe(2);
+  });
+
+  test("without a clock a failed chart stays failed instead of re-rendering every draw", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    on("clock.now", () => ({ value: 0 }));
+    const opts: StubOpts = { localFail: true, present: ["mmdc"] };
+    stubWorld(on, opts);
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY);
+    opts.localFail = false;
+    opts.localPng = true;
+    await ui.redraw();
+    await ui.redraw();
+    expect(await ui.find({ type: "Text", text: /Local PNG render failed/ })).toBeDefined();
+    expect(renderRuns.length).toBe(1);
+  });
+
+  test("a draw waiting on a slow shared render falls back within its budget, then upgrades", { timeoutMs: 30_000 }, async ($, on) => {
+    resetMem();
+    echoRow(on);
+    // probe + render: 12 s, longer than a waiting draw's 10 s hook budget
+    stubWorld(on, { localPng: true, present: ["mmdc"], slowRenderMs: 6_000 });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const [owner, waiter] = await Promise.all([mountRow($, REPLY), mountRow($, REPLY)]);
+    expect(await owner.find({ type: "Image" })).toBeDefined();
+    // the waiter's hook ran to completion: never the raw fence of a skipped hook
+    expect(await waiter.find({ type: "Text", text: /```mermaid/ })).not.toBeDefined();
+    // once the shared render landed, the waiter's row redrew with it
+    expect(await waiter.find({ type: "Image" })).toBeDefined();
+    expect(renderRuns.length).toBe(1);
+  });
+
+  test("a local render killed by the process timeout counts as timed out", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { runTimeout: true, present: ["mmdc"] });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY);
+    expect(await ui.find({ type: "Text", text: /Local PNG render timed out/ })).toBeDefined();
+    await ui.redraw(); // inside the retry window: no second 60 s render
+    expect(renderRuns.length).toBe(1);
+  });
+
+  test("a cut mermaid-cli probe is not remembered as mermaid-cli missing", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    const isProbe = (s: string) => s.includes("command -v mmdc") && !s.includes("-i ");
+    stubWorld(on, { localPng: true, present: ["mmdc"], cut: { match: isProbe, times: 1 } });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY);
+    expect(await ui.find({ type: "Text", text: /not found/ })).not.toBeDefined();
+    await ui.redraw();
+    expect(await ui.find({ type: "Image" })).toBeDefined();
+  });
+
+  test("a failed local render retries once the retry window passes", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    let nowMs = 1_000_000;
+    on("clock.now", () => ({ value: nowMs }));
+    const opts: StubOpts = { localFail: true, present: ["mmdc"] };
+    stubWorld(on, opts);
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY);
+    expect(await ui.find({ type: "Text", text: /Local PNG render failed/ })).toBeDefined();
+    opts.localFail = false;
+    opts.localPng = true; // the cause went away (e.g. Chromium finished installing)
+
+    await ui.redraw(); // inside the window: no new render, the note stays
+    expect(await ui.find({ type: "Image" })).not.toBeDefined();
+    expect(await ui.find({ type: "Text", text: /Local PNG render failed/ })).toBeDefined();
+    expect(renderRuns.length).toBe(1);
+
+    nowMs += 61_000;
+    await ui.redraw();
+    expect(await ui.find({ type: "Image" })).toBeDefined();
+    expect(renderRuns.length).toBe(2);
+  });
+
+  test("a failed chart keeps its own note after another chart renders", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localPng: true, present: ["mmdc"], failMarker: "Broken" });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const bad = await mountRow($, "```mermaid\nflowchart LR\n  A[Broken] --> B[End]\n```");
+    expect(await bad.find({ type: "Text", text: /Local PNG render failed/ })).toBeDefined();
+    const good = await mountRow($, REPLY);
+    expect(await good.find({ type: "Image" })).toBeDefined();
+    await bad.redraw();
+    expect(await bad.find({ type: "Text", text: /Local PNG render failed/ })).toBeDefined();
+  });
+
+  test("the local render's process timeout outlasts its own 45 s bound", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localPng: true, present: ["mmdc"] });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    await mountRow($, REPLY);
+    expect(renderRuns.length).toBe(1);
+    // the default 30 s would kill mmdc before `timeout 45` can report it
+    const ms = Number(/"timeoutMs":(\d+)/.exec(renderRuns[0] ?? "")?.[1]);
+    expect(ms).toBeGreaterThan(45_000);
+  });
+
   test("explicit opt-in enables mermaid.ink fallback", async ($, on) => {
     resetMem();
     echoRow(on);
@@ -312,6 +567,23 @@ describe("mermaid-pane", () => {
     const ui = await mountRow($, REPLY);
     expect(await ui.find({ type: "Image" })).toBeDefined();
     expect(inkRequestCount()).toBeGreaterThan(0);
+  });
+
+  test("a cut mermaid.ink sizing request is retried, not cached", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    const isSizing = (s: string) => s.includes("mermaid.ink/svg/");
+    stubWorld(on, { png: true, cut: { match: isSizing, times: 1 } });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    store["external"] = "on";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY);
+    await ui.redraw();
+    expect(await ui.find({ type: "Image" })).toBeDefined();
+    // the cut request, then a real one: the cut left nothing cached
+    expect(processRuns.filter(isSizing).length).toBe(2);
   });
 
   test("remote failure with external ON degrades safely without leaking source in diagnostics", async ($, on) => {
