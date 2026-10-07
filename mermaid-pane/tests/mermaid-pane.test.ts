@@ -3,6 +3,8 @@ import { describe, expect, test } from "claude-code/testing";
 const REPLY = "intro line\n```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```";
 const REPLY_EDGES = "```mermaid\nflowchart LR\n  P[Phone] --> W[WiFi Router] --> N[Internet]\n```";
 const SECRET = "SECRET_DIAGRAM_PAYLOAD_XYZ";
+// beautiful-mermaid art for REPLY_EDGES that shows every node it names.
+const BM_ART = "[BM ART] Phone ──▶ WiFi Router ──▶ Internet";
 const REPLY_SECRET = "```mermaid\nflowchart LR\n  A[" + SECRET + "] --> B[End]\n```";
 
 // In-memory $.state backing (mode is the session value).
@@ -29,6 +31,10 @@ let processRuns: string[] = [];
 let renderRuns: string[] = [];
 // termaid render payloads.
 let termaidRuns: string[] = [];
+// Toasts the mod raised.
+let toasts: string[] = [];
+// beautiful-mermaid render payloads.
+let bmRuns: string[] = [];
 
 type StubOpts = {
   png?: boolean;
@@ -47,6 +53,12 @@ type StubOpts = {
   abortRenders?: number;
   /** The first `times` commands matching `match` are cut mid-run. */
   cut?: { match: (s: string) => boolean; times: number };
+  /** beautiful-mermaid is installed (runtime + package + runner); what it prints. */
+  bmArt?: string;
+  /** The beautiful-mermaid run exits nonzero (a parse error). */
+  bmFails?: boolean;
+  /** The system `open` exits nonzero (no viewer, not macOS). */
+  openFails?: boolean;
   /** The mmdc probe and each local render take this long (real time). */
   slowRenderMs?: number;
   /** Local renders are killed by $.process.run's own timeout. */
@@ -66,6 +78,12 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, opts: StubOpts = 
   processRuns = [];
   renderRuns = [];
   termaidRuns = [];
+  toasts = [];
+  bmRuns = [];
+  on("ui.toast", (_$: unknown, e: { text: string }) => {
+    toasts.push(e.text);
+    return { value: undefined };
+  });
   on("session.start", () => ({ cwd: "/work" }));
   on("session.messages", () => ({ value: [] }));
   on("state.get", (_$: unknown, e: { plugin: string; key: string }) => {
@@ -89,6 +107,16 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, opts: StubOpts = 
   on("process.run", (_$: unknown, cmd: unknown) => {
     const s = JSON.stringify(cmd);
     processRuns.push(s);
+    if (s.includes("beautiful-mermaid") && s.includes("render.mjs") && !s.includes("printf") && !s.includes("nohup")) {
+      // probe: the runtime that runs the installed renderer
+      const ok = opts.bmArt !== undefined;
+      return { value: { exitCode: ok ? 0 : 1, stdout: ok ? "/usr/bin/bun" : "" } };
+    }
+    if (s.includes("render.mjs") && s.includes("printf") && !s.includes("nohup")) {
+      bmRuns.push(s);
+      return { value: { exitCode: opts.bmFails ? 1 : 0, stdout: opts.bmFails ? "" : opts.bmArt ?? "" } };
+    }
+    if (s.includes('"argv":["open"')) return { value: { exitCode: opts.openFails ? 1 : 0, stdout: "", stderr: "" } };
     if (opts.cut && opts.cut.times > 0 && opts.cut.match(s)) {
       opts.cut.times--;
       return { deny: "aborted" };
@@ -114,6 +142,11 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, opts: StubOpts = 
     if (opts.termaidArt !== undefined && s.includes("termaid") && s.includes("--width")) {
       termaidRuns.push(s);
       return { value: { exitCode: 0, stdout: opts.termaidArt } };
+    }
+    if (s.includes("command -v bun") && s.includes("command -v npm")) {
+      const p = opts.present ?? [];
+      const ok = p.includes("bun") || p.includes("npm");
+      return { value: { exitCode: ok ? 0 : 1, stdout: ok ? "/usr/bin/runtime" : "" } };
     }
     if (s.includes("nohup")) {
       setupRuns.push(s);
@@ -291,6 +324,71 @@ describe("mermaid-pane", () => {
       expect(await ui.find({ type: "Text", text: /\[TERMAID ART\]/ })).toBeDefined();
     });
   }
+
+  test("ascii mode prefers beautiful-mermaid art for the types it draws", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { present: ["termaid"], termaidArt: "[TERMAID ART]", bmArt: BM_ART });
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY_EDGES);
+    expect(await ui.find({ type: "Text", text: /\[BM ART\]/ })).toBeDefined();
+    expect(termaidRuns.length).toBe(0);
+  });
+
+  for (const [why, opts] of [
+    ["is wider than the reply", { bmArt: "─".repeat(400) }],
+    ["fails", { bmArt: "[BM ART]", bmFails: true }],
+  ] as const) {
+    test(`beautiful-mermaid art that ${why} falls to termaid`, async ($, on) => {
+      resetMem();
+      echoRow(on);
+      stubWorld(on, { present: ["termaid"], termaidArt: "[TERMAID ART]", ...opts });
+      await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+      const ui = await mountRow($, REPLY_EDGES);
+      expect(await ui.find({ type: "Text", text: /\[TERMAID ART\]/ })).toBeDefined();
+      expect(bmRuns.length).toBe(1);
+    });
+  }
+
+  test("a renderer /mermaid setup finds is used without a reload", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    const opts: StubOpts = { present: ["termaid"], termaidArt: "[TERMAID ART]" };
+    stubWorld(on, opts);
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY_EDGES); // beautiful-mermaid not installed yet
+    expect(await ui.find({ type: "Text", text: /\[TERMAID ART\]/ })).toBeDefined();
+    opts.bmArt = BM_ART; // the background install finished
+    await callMermaid($, "setup"); // the re-run that reports it
+    await ui.redraw();
+    expect(await ui.find({ type: "Text", text: /\[BM ART\]/ })).toBeDefined();
+  });
+
+  test("beautiful-mermaid art that drops a node falls to termaid", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    // 1.1.3 reads `A-->B` (no spaces) as one box "A--" and still exits 0
+    stubWorld(on, { present: ["termaid"], termaidArt: "[TERMAID ART]", bmArt: "┌─────┐\n│ A-- │\n└─────┘" });
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, "```mermaid\ngraph TD\nA-->B\n```");
+    expect(await ui.find({ type: "Text", text: /\[TERMAID ART\]/ })).toBeDefined();
+    expect(bmRuns.length).toBe(1);
+  });
+
+  test("types beautiful-mermaid does not draw go straight to termaid", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { present: ["termaid"], termaidArt: "[TERMAID ART]", bmArt: "[BM ART]" });
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, "```mermaid\ngantt\n  title Release\n  Design :a1, 2026-01-01, 5d\n```");
+    expect(await ui.find({ type: "Text", text: /\[TERMAID ART\]/ })).toBeDefined();
+    expect(bmRuns.length).toBe(0);
+  });
 
   test("rows without mermaid blocks pass through untouched", async ($, on) => {
     resetMem();
@@ -565,6 +663,38 @@ describe("mermaid-pane", () => {
     expect(await ui.find({ type: "Image" })).toBeDefined();
   });
 
+  test("each chart image has a button that opens the full-size PNG", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localPng: true, present: ["mmdc"] });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY);
+    const button = (await ui.find({ type: "Button", text: /open full size/ })) as any;
+    expect(button).toBeDefined();
+    processRuns = [];
+    await ui.press({ key: button.key });
+    // the PNG mmdc rendered, by argv — no shell, nothing of the source
+    expect(processRuns.some((s) => /"argv":\["open","\/tmp\/mermaid-pane\/d[0-9a-z]+\.png"\]/.test(s))).toBe(true);
+    expect(toasts).toEqual([]);
+  });
+
+  test("a full-size open that fails says so", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    stubWorld(on, { localPng: true, present: ["mmdc"], openFails: true });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    const ui = await mountRow($, REPLY);
+    const button = (await ui.find({ type: "Button", text: /open full size/ })) as any;
+    await ui.press({ key: button.key });
+    expect(toasts.some((t) => /could not open/.test(t))).toBe(true);
+  });
+
   test("explicit opt-in enables mermaid.ink fallback", async ($, on) => {
     resetMem();
     echoRow(on);
@@ -657,8 +787,8 @@ describe("mermaid-pane", () => {
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
 
     const out = (await callMermaid($, "setup")).text;
-    expect(out).toMatch(/installing termaid, mermaid-cli \(mmdc\) in the background/i);
-    expect(setupRuns.length).toBe(2);
+    expect(out).toMatch(/installing termaid, mermaid-cli \(mmdc\), beautiful-mermaid in the background/i);
+    expect(setupRuns.length).toBe(3);
     // termaid: pip --user install, console script linked into ~/.local/bin
     expect(setupRuns[0]).toContain("pip install --user");
     expect(setupRuns[0]).toContain("termaid");
@@ -667,6 +797,10 @@ describe("mermaid-pane", () => {
     expect(setupRuns[1]).toContain("@mermaid-js/mermaid-cli");
     expect(setupRuns[1]).not.toContain("@mermaid-cli@latest");
     expect(setupRuns[1]).toContain("npm install -g");
+    // beautiful-mermaid: pinned, into the mod's own folder, with its runner; npm without bun
+    expect(setupRuns[2]).toContain("beautiful-mermaid@1.1.3");
+    expect(setupRuns[2]).toContain("npm install --save-exact");
+    expect(setupRuns[2]).toContain("render.mjs");
     expect(out).toMatch(/external on/i);
   });
 
@@ -676,7 +810,7 @@ describe("mermaid-pane", () => {
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
     const out = await callMermaid($, "setup");
     expect(out.text).toMatch(/termaid — install it manually \(needs Python 3\.9\+ and pip\)/);
-    expect(setupRuns.length).toBe(1); // only the mermaid-cli install starts
+    expect(setupRuns.length).toBe(2); // mermaid-cli and beautiful-mermaid start
     expect(setupRuns[0]).toContain("@mermaid-js/mermaid-cli");
   });
 
@@ -686,14 +820,29 @@ describe("mermaid-pane", () => {
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
     const out = await callMermaid($, "setup");
     expect(out.text).toMatch(/mermaid-cli \(mmdc\) — install it manually \(needs Node \+ npm\)/);
+    expect(out.text).toMatch(/beautiful-mermaid — install it manually \(needs Bun, or Node \+ npm\)/);
     expect(setupRuns.length).toBe(1); // only the termaid install starts
     expect(setupRuns[0]).toContain("pip install --user");
     expect(setupRuns[0]).toContain("termaid");
   });
 
+  test("/mermaid setup's beautiful-mermaid install tries bun before npm", async ($, on) => {
+    resetMem();
+    stubWorld(on, { present: ["termaid", "mmdc", "bun"] });
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+    const out = await callMermaid($, "setup");
+    expect(out.text).toMatch(/installing beautiful-mermaid in the background/i);
+    expect(setupRuns.length).toBe(1);
+    // the shell picks at install time: bun on PATH or in ~/.bun/bin, else npm
+    const sh = setupRuns[0] ?? "";
+    expect(sh).toContain(".bun/bin/bun");
+    expect(sh.indexOf("add --exact beautiful-mermaid@1.1.3")).toBeGreaterThan(-1);
+    expect(sh.indexOf("add --exact")).toBeLessThan(sh.indexOf("npm install --save-exact"));
+  });
+
   test("/mermaid setup stays quiet when everything is installed", async ($, on) => {
     resetMem();
-    stubWorld(on, { present: ["termaid", "mmdc"] });
+    stubWorld(on, { present: ["termaid", "mmdc"], bmArt: "[BM ART]" });
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
     const out = await callMermaid($, "setup");
     expect(out.text).toMatch(/everything is installed/i);
@@ -708,7 +857,7 @@ describe("mermaid-pane", () => {
     await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
     const out = await callMermaid($, "");
     expect(out.text).toMatch(/mode — external OFF — \/mermaid (ascii|image) to switch\./);
-    expect(out.text).toMatch(/renderers: termaid ✗ · mermaid-cli ✗ — \/mermaid setup/);
+    expect(out.text).toMatch(/renderers: beautiful-mermaid ✗ · termaid ✗ · mermaid-cli ✗ — \/mermaid setup/);
     expect(out.text).toMatch(/remote: OFF/);
   });
 });

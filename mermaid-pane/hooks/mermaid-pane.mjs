@@ -154,32 +154,92 @@ async function probeTool($) {
   return probedTool;
 }
 
-// --- tier 1: termaid (multi-type Mermaid → Unicode/ASCII art) ----------------
+// --- tier 1: beautiful-mermaid, then termaid (Mermaid → Unicode art) ---------
+
+// beautiful-mermaid (npm) is installed by /mermaid setup into its own folder,
+// pinned, with a tiny runner; bun runs it when present, else node.
+const BM_VERSION = "1.1.3";
+const BM_DIR = "$HOME/.local/share/mermaid-pane/beautiful-mermaid"; // expanded by sh
+const BM_TYPES = /^(flowchart|graph|stateDiagram(-v2)?|sequenceDiagram|classDiagram|erDiagram|xychart(-beta)?)\b/;
+const RUNTIME_SH =
+  `if command -v bun >/dev/null 2>&1; then command -v bun; ` +
+  `elif [ -x "$HOME/.bun/bin/bun" ]; then echo "$HOME/.bun/bin/bun"; ` +
+  `else ${NVM_PATH_PRELUDE}command -v node; fi`;
+const BM_PROBE_SH =
+  `D="${BM_DIR}"; [ -f "$D/render.mjs" ] && [ -f "$D/node_modules/beautiful-mermaid/package.json" ] || exit 1; ${RUNTIME_SH}`;
+let probedBm; // undefined = not probed this load
+
+async function probeBm($) {
+  if (probedBm !== undefined) return probedBm;
+  probedBm = await probeSh($, BM_PROBE_SH);
+  return probedBm;
+}
 
 function artWidth(art) {
   return Math.max(0, ...art.split("\n").map((l) => l.length));
+}
+
+// Run one art renderer: its art when it exits 0 and fits the budget, else
+// null; `cut` when the host cut the run (no answer, so nothing is cached).
+async function artFrom($, sh, budget) {
+  try {
+    const { exitCode, stdout } = await run($, sh);
+    if ((exitCode ?? 1) !== 0 || !stdout?.trim()) return { art: null, cut: false };
+    const art = stdout.replace(/\n+$/, "");
+    return { art: artWidth(art) <= budget ? art : null, cut: false };
+  } catch (err) {
+    return { art: null, cut: isAborted(err) };
+  }
+}
+
+// beautiful-mermaid 1.1.3 reads an arrow written without spaces (`A-->B`) as
+// one box "A--" and still exits 0. Graph art is accepted only when it shows
+// every node an edge names: its label's first word, else its id.
+function showsEveryNode(code, art) {
+  if (!/^(flowchart|graph|stateDiagram)/.test(code)) return true;
+  const flat = code.replace(/<br\s*\/?>/gi, " ");
+  const labels = {};
+  for (const m of flat.matchAll(/([A-Za-z]\w*)\s*[\[\(\{]+"?([^\]\)\}"]+)"?[\]\)\}]+/g)) labels[m[1]] = m[2].trim();
+  const shown = (word) => new RegExp(`(^|[^A-Za-z0-9_])${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^A-Za-z0-9_]|$)`, "m").test(art);
+  for (const line of normalize(flat).split("\n").slice(1)) {
+    const segs = line.split(/-->>|-->|===|---|-\.->|->>|==>|--x|--o/);
+    if (segs.length < 2) continue;
+    for (const seg of segs) {
+      const id = /^\s*(?:\|[^|]*\|)?\s*([A-Za-z]\w*)/.exec(seg)?.[1];
+      if (!id) continue;
+      const word = (labels[id] ?? id).split(/\s+/)[0];
+      if (word && !shown(word)) return false;
+    }
+  }
+  return true;
 }
 
 async function asciiFor($, code, budget) {
   code = normalize(code);
   const cacheKey = `${budget}|${code}`;
   if (artCache.has(cacheKey)) return artCache.get(cacheKey);
-  const tool = await probeTool($);
-  let cut = tool === undefined; // a cut probe or run is no answer: don't cache
+  let cut = false; // a cut probe or run is no answer: don't cache
   let art = null;
-  if (tool) {
-    // termaid already re-renders with smaller gaps and padding to fit --width;
-    // what still overflows is as compact as it gets, so edge art takes over.
-    const sh = `printf '%s' ${shellQuote(code)} | ${shellQuote(tool)} --width ${budget} 2>/dev/null`;
-    try {
-      const { exitCode, stdout } = await run($, sh);
-      if ((exitCode ?? 1) === 0 && stdout?.trim()) {
-        art = stdout.replace(/\n+$/, "");
-        if (artWidth(art) > budget) art = null;
-      }
-    } catch (err) {
-      cut = isAborted(err);
-      art = null;
+  // beautiful-mermaid keeps every label but draws only some types and takes
+  // no width, so art wider than the reply falls through to termaid.
+  if (BM_TYPES.test(code)) {
+    const runtime = await probeBm($);
+    cut ||= runtime === undefined;
+    if (runtime) {
+      const r = await artFrom($, `printf '%s' ${shellQuote(code)} | ${shellQuote(runtime)} "${BM_DIR}/render.mjs" 2>/dev/null`, budget);
+      art = r.art && showsEveryNode(code, r.art) ? r.art : null;
+      cut ||= r.cut;
+    }
+  }
+  if (!art) {
+    const tool = await probeTool($);
+    cut ||= tool === undefined;
+    if (tool) {
+      // termaid already re-renders with smaller gaps and padding to fit --width;
+      // what still overflows is as compact as it gets, so edge art takes over.
+      const r = await artFrom($, `printf '%s' ${shellQuote(code)} | ${shellQuote(tool)} --width ${budget} 2>/dev/null`, budget);
+      art = r.art;
+      cut ||= r.cut;
     }
   }
   const result = art ?? edgeArt(code) ?? code; // full code, wrapped — never cut
@@ -464,10 +524,35 @@ function sizePng(png, maxColumns, maxRows) {
   return { file: png.file, columns, rows };
 }
 
-// Center the image horizontally in the full row width, with vertical padding.
-function centered(box, child, key) {
+// Center the image horizontally in the full row width, with vertical padding;
+// the button under it (if any) centers with it.
+function centered(box, child, key, below) {
   const { Box, Image } = box;
-  return Box({ width: "100%", alignItems: "center", paddingY: 1, children: [Image({ key, source: child.source, columns: child.columns, rows: child.rows, alt: child.alt })] });
+  const image = Image({ key, source: child.source, columns: child.columns, rows: child.rows, alt: child.alt });
+  const children = below ? [image, Box({ width: "100%", justifyContent: "center", children: [below] })] : [image];
+  return Box({ width: "100%", flexDirection: "column", alignItems: "center", paddingY: 1, children });
+}
+
+// An Image takes no press, so a plain button under it opens the 2x PNG in the
+// system viewer (macOS `open`: zoom, fullscreen). argv, no shell: the path is
+// our own hash-named file.
+function openButton($, Button, file, key) {
+  return Button({
+    key,
+    label: "⤢ open full size",
+    plain: true,
+    dimColor: true,
+    onPress: async () => {
+      let ok = false;
+      try {
+        const r = await $.process.run(["open", file]);
+        ok = ((r?.value ?? r)?.exitCode ?? 1) === 0;
+      } catch {
+        ok = false;
+      }
+      if (!ok) $.ui.toast(`mermaid-pane: could not open ${file}`);
+    },
+  });
 }
 
 // --- transcript scan (for the image-mode pre-warm on turn completion) -------
@@ -572,9 +657,10 @@ async function renderAssistant($, e, next) {
   const budget = budgetOf(e);
   const maxRows = Math.max(8, Math.round((e?.viewport?.rows ?? 40) * 0.7));
   const resolved = $.ui.resolve(e);
-  const { Box, Text, Markdown } = resolved;
+  const { Box, Text, Markdown, Button } = resolved;
   if ((await getMode($)) === "image") {
     const blocks = [];
+    let chartIndex = 0;
     for (const part of splitByFences(text)) {
       if (part.kind === "text") {
         const t = part.text.replace(/^\n+|\n+$/g, "");
@@ -583,7 +669,8 @@ async function renderAssistant($, e, next) {
         const png = await ensurePng($, part.code, next);
         if (png) {
           const sized = sizePng(png, budget, maxRows);
-          blocks.push(centered(resolved, { source: { file: sized.file, format: "png" }, columns: sized.columns, rows: sized.rows, alt: await asciiFor($, part.code, budget) }));
+          const open = openButton($, Button, sized.file, `open-${chartIndex++}`);
+          blocks.push(centered(resolved, { source: { file: sized.file, format: "png" }, columns: sized.columns, rows: sized.rows, alt: await asciiFor($, part.code, budget) }, undefined, open));
         } else {
           const art = await asciiFor($, part.code, budget);
           const diag = pngDiag(part.code);
@@ -637,6 +724,27 @@ const MMDC_INSTALL_SH =
   `[ "$M" -ge 23 ] || S=@mermaid-js/mermaid-cli@11; ` +
   `[ "$M" -ge 19 ] || S=@mermaid-js/mermaid-cli@10.9.1; ` +
   `npm install -g "$S"`;
+
+// beautiful-mermaid is a library (no CLI, no binary), so it goes into the
+// mod's own folder, pinned, beside a tiny stdin → ASCII runner. bun installs
+// and runs it when present, else npm/node.
+const BM_RUNNER =
+  `import { renderMermaidASCII } from "beautiful-mermaid";\n` +
+  `let src = ""; for await (const c of process.stdin) src += c;\n` +
+  `process.stdout.write(renderMermaidASCII(src, { colorMode: "none" }) + "\\n");\n`;
+const BUN_SH = `B=""; if command -v bun >/dev/null 2>&1; then B=$(command -v bun); elif [ -x "$HOME/.bun/bin/bun" ]; then B="$HOME/.bun/bin/bun"; fi; `;
+const BM_INSTALL_SH =
+  `set -e; D="${BM_DIR}"; mkdir -p "$D"; cd "$D"; ` +
+  `[ -f package.json ] || printf '{"private":true}\n' > package.json; ` +
+  BUN_SH +
+  `if [ -n "$B" ]; then "$B" add --exact beautiful-mermaid@${BM_VERSION}; ` +
+  `else ${NVM_PATH_PRELUDE}npm install --save-exact beautiful-mermaid@${BM_VERSION}; fi; ` +
+  `printf '%s' ${shellQuote(BM_RUNNER)} > render.mjs; ` +
+  `echo "installed beautiful-mermaid@${BM_VERSION} in $D"`;
+// Something that can install it: bun, else npm.
+const BM_TOOLCHAIN_SH =
+  `if command -v bun >/dev/null 2>&1; then command -v bun; elif [ -x "$HOME/.bun/bin/bun" ]; then echo "$HOME/.bun/bin/bun"; ` +
+  `else ${NVM_PATH_PRELUDE}command -v npm; fi`;
 
 // Installs run detached (nohup) so the hook never blocks on npm/pip; the log
 // lands in PNG_DIR and a re-run of /mermaid setup reports progress.
@@ -696,11 +804,21 @@ export function register(on) {
         const starting = [];
         const ascii = await probeFresh($, "termaid");
         const mmdc = await probeFresh($, "mmdc", NVM_PATH_PRELUDE);
+        const bm = await probeSh($, BM_PROBE_SH);
+        // Renderers a background install added since the last probe draw now,
+        // not after a reload: adopt the fresh answers and drop what they shaped.
+        probedTool = ascii;
+        probedMmdc = mmdc;
+        probedBm = bm;
+        artCache.clear();
+        pngFailed.clear();
+        if (bm) lines.push("✓ beautiful-mermaid (most faithful ASCII art: flowchart, sequence, state, class, ER, XY)");
         if (ascii) lines.push("✓ termaid (multi-type ASCII art)");
         if (mmdc) lines.push("✓ mermaid-cli (offline PNG rendering)");
         for (const [key, have, label] of [
           ["ascii", ascii, "termaid"],
           ["mmdc", mmdc, "mermaid-cli (mmdc)"],
+          ["bm", bm, "beautiful-mermaid"],
         ]) {
           if (have) continue;
           if (key === "ascii" && !(await probeFresh($, "python3"))) {
@@ -711,7 +829,11 @@ export function register(on) {
             lines.push(`✗ ${label} — install it manually (needs Node + npm)`);
             continue;
           }
-          const sh = key === "ascii" ? ASCII_INSTALL_SH : MMDC_INSTALL_SH;
+          if (key === "bm" && !(await probeSh($, BM_TOOLCHAIN_SH))) {
+            lines.push(`✗ ${label} — install it manually (needs Bun, or Node + npm)`);
+            continue;
+          }
+          const sh = { ascii: ASCII_INSTALL_SH, mmdc: MMDC_INSTALL_SH, bm: BM_INSTALL_SH }[key];
           if (await startInstall($, key, sh)) {
             starting.push(label);
             lines.push(`… ${label} — installing in the background`);
@@ -725,11 +847,11 @@ export function register(on) {
           text =
             `Installing ${starting.join(", ")} in the background (log: ${PNG_DIR}/setup.log).` +
             (blocked.length ? `\n${blocked.join("\n")}` : "") +
-            `\nRe-run /mermaid setup to check; new sessions pick renderers up automatically.` +
+            `\nRe-run /mermaid setup to check; once it reports them, charts use them right away.` +
             `\nImage mode stays local unless you /mermaid external on (sends full diagram source to mermaid.ink).`;
         } else if (lines.every((l) => l.startsWith("✓"))) {
           text =
-            "Everything is installed — ascii art via termaid, images via mermaid-cli." +
+            "Everything is installed — ascii art via beautiful-mermaid and termaid, images via mermaid-cli." +
             "\nRemote mermaid.ink fallback is opt-in: /mermaid external on (sends full diagram source; persists).";
         } else {
           text = `Renderer status:\n${lines.join("\n")}`;
@@ -782,9 +904,11 @@ export function register(on) {
       const external = await getExternalAllowed($);
       const ascii = await probeFresh($, "termaid");
       const mmdc = await probeFresh($, "mmdc", NVM_PATH_PRELUDE);
+      const bm = await probeSh($, BM_PROBE_SH);
       let text = `${mode} mode — external ${external ? "ON" : "OFF"} — /mermaid ${mode === "image" ? "ascii" : "image"} to switch.`;
-      if (!ascii || !mmdc) {
+      if (!ascii || !mmdc || !bm) {
         const parts = [];
+        parts.push(`beautiful-mermaid ${bm ? "✓" : "✗"}`);
         parts.push(`termaid ${ascii ? "✓" : "✗"}`);
         parts.push(`mermaid-cli ${mmdc ? "✓" : "✗"}`);
         text += `\nrenderers: ${parts.join(" · ")} — /mermaid setup installs missing ones`;
