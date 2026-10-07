@@ -143,6 +143,7 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, opts: StubOpts = 
       termaidRuns.push(s);
       return { value: { exitCode: 0, stdout: opts.termaidArt } };
     }
+    if (s.includes("home:$HOME")) return { value: { exitCode: 0, stdout: "home:/Users/u\n" } };
     if (s.includes("command -v bun") && s.includes("command -v npm")) {
       const p = opts.present ?? [];
       const ok = p.includes("bun") || p.includes("npm");
@@ -677,7 +678,7 @@ describe("mermaid-pane", () => {
     processRuns = [];
     await ui.press({ key: button.key });
     // the PNG mmdc rendered, by argv — no shell, nothing of the source
-    expect(processRuns.some((s) => /"argv":\["open","\/tmp\/mermaid-pane\/d[0-9a-z]+\.png"\]/.test(s))).toBe(true);
+    expect(processRuns.some((s) => /"argv":\["open","\/Users\/u\/\.cache\/mermaid-pane\/d[0-9a-z]+\.png"\]/.test(s))).toBe(true);
     expect(toasts).toEqual([]);
   });
 
@@ -693,6 +694,52 @@ describe("mermaid-pane", () => {
     const button = (await ui.find({ type: "Button", text: /open full size/ })) as any;
     await ui.press({ key: button.key });
     expect(toasts.some((t) => /could not open/.test(t))).toBe(true);
+  });
+
+  test("every command the mod runs starts in / — never the session's (maybe untrusted) repo", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    // a repo's bunfig.toml `preload` or .puppeteerrc.cjs would run when bun/mmdc start there
+    stubWorld(on, { localPng: true, present: ["mmdc", "termaid"], termaidArt: "[TERMAID ART]", bmArt: BM_ART });
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    await mountRow($, REPLY_EDGES); // ascii: beautiful-mermaid
+    await mountRow($, "```mermaid\ngantt\n  Design :a1, 2026-01-01, 5d\n```"); // ascii: termaid
+    await callMermaid($, "image");
+    const ui = await mountRow($, REPLY); // image: mmdc
+    const button = (await ui.find({ type: "Button", text: /open full size/ })) as any;
+    await ui.press({ key: button.key });
+    await callMermaid($, "setup");
+    expect(processRuns.length).toBeGreaterThan(5);
+    for (const s of processRuns) expect(s).toContain('"cwd":"/"');
+  });
+
+  test("rendered files and install scripts live in a private per-user dir, never shared /tmp", async ($, on) => {
+    resetMem();
+    echoRow(on);
+    // missing mmdc + external on: the mermaid.ink path writes too; setup starts installs
+    stubWorld(on, { png: true, present: ["npm", "python3"] });
+    mem["mermaid-pane:mode"] = "image";
+    store["mode"] = "image";
+    store["external"] = "on";
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: "/work" });
+
+    await mountRow($, REPLY);
+    await callMermaid($, "setup");
+    expect(setupRuns.length).toBeGreaterThan(0);
+    // /tmp is shared: another local user could pre-create a dir there (plant files or block it)
+    for (const s of processRuns) expect(s).not.toContain("/tmp/mermaid-pane");
+    const dir = "/Users/u/.cache/mermaid-pane";
+    const touching = processRuns.filter((s) => s.includes(`${dir}/`));
+    expect(touching.some((s) => s.includes("mermaid.ink"))).toBe(true);
+    expect(touching.some((s) => s.includes("nohup"))).toBe(true);
+    for (const s of touching) {
+      // defence in depth: verified ours, not a symlink, private — before first use
+      const guard = s.indexOf(`[ -O '${dir}' ]`);
+      expect(guard).toBeGreaterThan(-1);
+      expect(s.indexOf(`! -L '${dir}'`)).toBeGreaterThan(-1);
+      expect(guard).toBeLessThan(s.indexOf(`${dir}/`));
+    }
   });
 
   test("explicit opt-in enables mermaid.ink fallback", async ($, on) => {

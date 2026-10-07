@@ -11,7 +11,7 @@
     {
       "name": "mermaid-pane",
       "description": "Renders mermaid code blocks inline as ASCII art (beautiful-mermaid, termaid) or images with an open-full-size button; mermaid.ink is opt-in via /mermaid external on.",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "source": "./mermaid-pane",
       "author": {
         "name": "ezoushen"
