@@ -572,13 +572,13 @@ async function renderAssistant($, e, next) {
   const budget = budgetOf(e);
   const maxRows = Math.max(8, Math.round((e?.viewport?.rows ?? 40) * 0.7));
   const resolved = $.ui.resolve(e);
-  const { Box, Text } = resolved;
+  const { Box, Text, Markdown } = resolved;
   if ((await getMode($)) === "image") {
     const blocks = [];
     for (const part of splitByFences(text)) {
       if (part.kind === "text") {
         const t = part.text.replace(/^\n+|\n+$/g, "");
-        if (t) blocks.push(Text({ wrap: "wrap", children: t }));
+        if (t) blocks.push(Markdown({ text: t })); // prose keeps the reply's markdown: tables, code spans
       } else {
         const png = await ensurePng($, part.code, next);
         if (png) {
