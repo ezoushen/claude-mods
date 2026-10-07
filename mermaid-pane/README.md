@@ -34,8 +34,8 @@ Without them the mod still works everywhere: **edge-list art** (built in, always
 
 ## Modes
 
-- **ascii** — termaid (`--width` + compact gaps) → built-in edge-list art → the source itself; text wraps, never clips. Always local.
-- **image** — local `mmdc -s 2` (bounded duration, no network) → optional mermaid.ink (opt-in) → `sips` → PNG, drawn as a native `Image` sized from the SVG's own viewBox when remote sizing is allowed; otherwise a fixed native width. Falls back to ascii art with a short actionable note when a PNG can't be produced. Real pixels need a terminal Claude Code can paint images in (**kitty, Ghostty**); other terminals — including iTerm2/WezTerm — draw the alt-text art instead.
+- **ascii** — termaid (`--width`, which compacts gaps itself) → built-in edge-list art when termaid's art is still wider than the reply → the source itself; text wraps, never clips. Always local.
+- **image** — local `mmdc -s 2` (bounded duration, no network) → optional mermaid.ink (opt-in) → `sips` → PNG, drawn as a native `Image` sized from the SVG's own viewBox when remote sizing is allowed; otherwise a fixed native width. Falls back to ascii art with a short actionable note when a PNG can't be produced; a failed chart is retried after a minute, and overlapping redraws share one render. Real pixels need a terminal Claude Code can paint images in (**kitty, Ghostty**); other terminals — including iTerm2/WezTerm — draw the alt-text art instead.
 
 ## Development
 

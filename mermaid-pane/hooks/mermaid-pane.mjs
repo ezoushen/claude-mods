@@ -21,11 +21,14 @@
 const MODE = { plugin: "mermaid-pane", key: "mode" }; // read while drawing: a set redraws the drawer
 const PNG_DIR = "/tmp/mermaid-pane";
 const LOCAL_RENDER_SECS = 45; // bound local mmdc so a hung Chromium cannot stall redraws
+const RETRY_MS = 60000; // a failed chart renders again after this long
 
 // Module-level memos: survive redraws, reset on hot reload (fine for caches).
 const artCache = new Map(); // `${budget}|${code}` -> art string
-const pngCache = new Map(); // base -> { file, w, h } | null
-const pngFailedAt = new Map(); // base -> ms of the last failed fetch (retry window)
+const pngCache = new Map(); // base -> { file, w, h, native } (successes only)
+const pngFailed = new Map(); // base -> { at, diag } of the last failure (retry window)
+const pngInflight = new Map(); // base -> the render in flight (shared by overlapping draws)
+const pngAwaited = new Set(); // bases a draw stopped waiting for: redraw when they land
 let pngsDirty = false; // a PNG was produced after some row may have drawn without it
 let probedTool; // undefined = not probed this load
 let lastPngDiag = null; // last safe diagnostic for /mermaid status (no source/URLs)
@@ -105,7 +108,7 @@ async function getExternalAllowed($) {
 function clearImageCaches() {
   pngCache.clear();
   svgCache.clear();
-  pngFailedAt.clear();
+  pngFailed.clear();
   pngsDirty = false;
   lastPngDiag = null;
 }
@@ -116,8 +119,8 @@ async function setExternalAllowed($, allowed) {
   await $.store.set("external", externalMemo);
 }
 
-async function run($, cmd) {
-  const r = await $.process.run(["/bin/sh", "-c", cmd]);
+async function run($, cmd, init) {
+  const r = await $.process.run(["/bin/sh", "-c", cmd], init);
   return r?.value ?? r ?? {};
 }
 
@@ -135,12 +138,13 @@ function whichSh(bin, prelude = "") {
   );
 }
 
+// The path, null when absent, undefined when the probe was cut (not an answer).
 async function probeSh($, sh) {
   try {
     const { exitCode, stdout } = await run($, sh);
     return (exitCode ?? 1) === 0 && stdout?.trim() ? stdout.trim() : null;
-  } catch {
-    return null;
+  } catch (err) {
+    return isAborted(err) ? undefined : null;
   }
 }
 
@@ -161,30 +165,25 @@ async function asciiFor($, code, budget) {
   const cacheKey = `${budget}|${code}`;
   if (artCache.has(cacheKey)) return artCache.get(cacheKey);
   const tool = await probeTool($);
+  let cut = tool === undefined; // a cut probe or run is no answer: don't cache
   let art = null;
   if (tool) {
-    // termaid auto-compacts to --width; tighter gaps if a render still overflows.
-    const tiers = [
-      ["--width", String(budget)],
-      ["--width", String(budget), "--gap", "2"],
-      ["--width", String(budget), "--gap", "1", "--padding-x", "1", "--padding-y", "1"],
-    ];
-    for (const flags of tiers) {
-      const sh = `printf '%s' ${shellQuote(code)} | ${shellQuote(tool)} ${flags.join(" ")} 2>/dev/null`;
-      try {
-        const { exitCode, stdout } = await run($, sh);
-        if ((exitCode ?? 1) === 0 && stdout?.trim()) {
-          art = stdout.replace(/\n+$/, "");
-          if (artWidth(art) <= budget) break;
-        }
-      } catch {
-        // next tier
+    // termaid already re-renders with smaller gaps and padding to fit --width;
+    // what still overflows is as compact as it gets, so edge art takes over.
+    const sh = `printf '%s' ${shellQuote(code)} | ${shellQuote(tool)} --width ${budget} 2>/dev/null`;
+    try {
+      const { exitCode, stdout } = await run($, sh);
+      if ((exitCode ?? 1) === 0 && stdout?.trim()) {
+        art = stdout.replace(/\n+$/, "");
+        if (artWidth(art) > budget) art = null;
       }
+    } catch (err) {
+      cut = isAborted(err);
       art = null;
     }
   }
   const result = art ?? edgeArt(code) ?? code; // full code, wrapped — never cut
-  artCache.set(cacheKey, result);
+  if (!cut) artCache.set(cacheKey, result);
   return result;
 }
 
@@ -197,6 +196,7 @@ function normalize(code) {
 }
 
 function edgeArt(code) {
+  code = code.replace(/<br\s*\/?>/gi, " "); // one edge per line: label breaks become spaces
   const labels = {};
   for (const m of code.matchAll(/([A-Za-z]\w*)\s*[\[\(\{]+([^\]\)\}]+)[\]\)\}]+/g)) {
     labels[m[1]] = m[2].trim();
@@ -267,25 +267,91 @@ function diagLocal(kind) {
   }
 }
 
-async function ensurePng($, code) {
+// A superseded draw's in-flight command is cut by the host ("… aborted").
+// That is not a render failure: nothing is recorded, a later draw renders.
+// The host words its own timeoutMs kill "aborted: still running after …ms";
+// that one is a real timeout.
+const ABORTED = Symbol("aborted");
+
+function isRunTimeout(err) {
+  return /still running after/i.test(String(err?.message ?? err));
+}
+
+function isAborted(err, signal) {
+  if (isRunTimeout(err)) return false;
+  return Boolean(signal?.aborted) || err?.name === "AbortError" || /\baborted\b/i.test(String(err?.message ?? err));
+}
+
+// Waiting on another draw's render is not a $ call, so this hook's budget
+// runs on through it: stop short of the budget (or at this draw's abort).
+const GAVE_UP = Symbol("gave-up");
+const WAIT_MARGIN_MS = 2000;
+
+async function awaitShared($, pending, next) {
+  const remaining = next?.budget?.remainingMs;
+  const ms = (Number.isFinite(remaining) ? remaining : 8000 + WAIT_MARGIN_MS) - WAIT_MARGIN_MS;
+  if (ms <= 0 || next?.signal?.aborted) return GAVE_UP;
+  const stop = new AbortController();
+  const cut = () => stop.abort();
+  next?.signal?.addEventListener?.("abort", cut);
+  try {
+    const timer = $.clock.sleep(ms, { signal: stop.signal }).then(
+      () => GAVE_UP,
+      () => GAVE_UP
+    );
+    return await Promise.race([pending, timer]);
+  } finally {
+    stop.abort();
+    next?.signal?.removeEventListener?.("abort", cut);
+  }
+}
+
+// Overlapping draws of one chart (several redraws, the turn-end pre-warm)
+// share the render in flight instead of racing their own mmdc runs.
+async function ensurePng($, code, next) {
   code = normalize(code);
   const base = `d${hash(code)}`;
-  if (pngCache.has(base)) return pngCache.get(base);
-  // Transient failures retry after a minute — never cached permanently, so
-  // missed charts upgrade on a later draw. No clock, no throttle (hosts
-  // without $.clock.now always allow the attempt).
+  const signal = next?.signal;
+  for (;;) {
+    if (pngCache.has(base)) return pngCache.get(base);
+    const pending = pngInflight.get(base);
+    if (!pending) break;
+    const shared = await awaitShared($, pending, next);
+    if (shared === GAVE_UP) {
+      pngAwaited.add(base); // draw the fallback now; redraw when it lands
+      return null;
+    }
+    if (shared !== ABORTED) return shared;
+    // the draw that owned it was cut: this one renders for itself
+  }
+  const own = renderPng($, code, base, signal).finally(() => pngInflight.delete(base));
+  pngInflight.set(base, own);
+  const result = await own;
+  return result === ABORTED ? null : result;
+}
+
+// The note a chart's ASCII fallback carries: its own last failure, if any.
+function pngDiag(code) {
+  return pngFailed.get(`d${hash(normalize(code))}`)?.diag ?? null;
+}
+
+async function renderPng($, code, base, signal) {
+  // Failures retry after a minute — never cached permanently, so missed
+  // charts upgrade on a later draw. Without a clock a failure stands for the
+  // session rather than re-running mmdc on every redraw.
   let now = 0;
   try {
     now = (await $.clock.now()) || 0;
   } catch {
     now = 0;
   }
-  const failedAt = pngFailedAt.get(base);
-  if (now && failedAt !== undefined && now - failedAt < 60000) return null;
+  const failed = pngFailed.get(base);
+  if (failed && (!now || now - failed.at < RETRY_MS)) return null;
   let result = null;
   let failKind = "failed";
   const png = `${PNG_DIR}/${base}.png`;
   const mmdc = await mmdcPath($);
+  if (mmdc === undefined) return ABORTED; // the probe was cut
   if (!mmdc) {
     failKind = "missing";
   } else {
@@ -303,7 +369,8 @@ async function ensurePng($, code) {
         `[ "$ec" -eq 124 ] && exit 124; [ "$ec" -eq 0 ] || exit "$ec"; ` +
         `else '${mmdc}' $P -i '${PNG_DIR}/${base}.mmd' -o '${png}' -b white -s 2 >/dev/null 2>&1 || exit $?; fi; ` +
         `sips -g pixelWidth -g pixelHeight '${png}'`;
-      const { exitCode, stdout } = await run($, sh);
+      // $.process.run kills at 30 s by default — before `timeout` could report.
+      const { exitCode, stdout } = await run($, sh, { timeoutMs: (LOCAL_RENDER_SECS + 15) * 1000 });
       if ((exitCode ?? 1) === 124) {
         failKind = "timeout";
       } else {
@@ -319,8 +386,9 @@ async function ensurePng($, code) {
           failKind = "failed";
         }
       }
-    } catch {
-      failKind = "failed";
+    } catch (err) {
+      if (isAborted(err, signal)) return ABORTED;
+      failKind = isRunTimeout(err) ? "timeout" : "failed";
       result = null;
     }
   }
@@ -332,9 +400,7 @@ async function ensurePng($, code) {
         const jpg = `${PNG_DIR}/${base}.jpg`;
         const targetPx = 2400;
         // Permission still holds at the moment of the request construction.
-        if (!(await getExternalAllowed($))) {
-          lastPngDiag = diagLocal(failKind);
-        } else {
+        if (await getExternalAllowed($)) {
           const sh =
             `mkdir -p '${PNG_DIR}' && curl -sfL --max-time 25 '${inkUrl(code, "img")}?type=png&width=${targetPx}' -o '${jpg}'` +
             ` && sips -s format png '${jpg}' --out '${png}' >/dev/null 2>&1` +
@@ -349,25 +415,31 @@ async function ensurePng($, code) {
             failKind = "remote-failed";
           }
         }
-      } catch {
+      } catch (err) {
+        if (isAborted(err, signal)) return ABORTED;
         failKind = "remote-failed";
         result = null;
       }
-    } else {
-      lastPngDiag = diagLocal(failKind);
     }
   }
   if (result) {
+    // Only successes are cached, so no failure can ever replace one.
+    pngFailed.delete(base);
     lastPngDiag = null;
-    pngFailedAt.delete(base);
-  } else {
-    if (!lastPngDiag) lastPngDiag = diagLocal(failKind);
-    if (now) pngFailedAt.set(base, now);
+    pngCache.set(base, result);
+    pngsDirty = true; // a row may have drawn without this PNG
+    if (pngAwaited.delete(base)) {
+      try {
+        await $.ui.invalidate("ui.render"); // a draw gave up waiting: upgrade it now
+      } catch {
+        // the turn-end pre-warm redraws it instead
+      }
+    }
+    return result;
   }
-  const wasCached = pngCache.has(base);
-  if (!wasCached && result) pngsDirty = true; // a row may have drawn without this PNG
-  pngCache.set(base, result);
-  return result;
+  lastPngDiag = diagLocal(failKind); // the newest failure, for /mermaid status
+  pngFailed.set(base, { at: now, diag: lastPngDiag });
+  return null;
 }
 
 // Cell grid for an Image. COMFORT_SCALE: mermaid label text is ~8px per char
@@ -453,7 +525,8 @@ async function naturalCols($, code) {
         const naturalPx = vb ? parseFloat(vb[3]) : mw ? parseFloat(mw[1]) : NaN;
         if (Number.isFinite(naturalPx) && naturalPx > 0) cols = Math.max(24, Math.min(100, Math.round(naturalPx / 16)));
       }
-    } catch {
+    } catch (err) {
+      if (isAborted(err)) throw err; // a cut draw: its render is redone, not mis-sized
       // fallback stands
     }
   }
@@ -507,13 +580,14 @@ async function renderAssistant($, e, next) {
         const t = part.text.replace(/^\n+|\n+$/g, "");
         if (t) blocks.push(Text({ wrap: "wrap", children: t }));
       } else {
-        const png = await ensurePng($, part.code);
+        const png = await ensurePng($, part.code, next);
         if (png) {
           const sized = sizePng(png, budget, maxRows);
           blocks.push(centered(resolved, { source: { file: sized.file, format: "png" }, columns: sized.columns, rows: sized.rows, alt: await asciiFor($, part.code, budget) }));
         } else {
           const art = await asciiFor($, part.code, budget);
-          const note = lastPngDiag ? `\n\n(${lastPngDiag})` : "";
+          const diag = pngDiag(part.code);
+          const note = diag ? `\n\n(${diag})` : "";
           blocks.push(Text({ wrap: "wrap", children: art + note }));
         }
       }
@@ -596,7 +670,7 @@ export function register(on) {
     if (e?.agentId) return r; // skip subagent loops
     try {
       if ((await getMode($)) === "image") {
-        for (const code of await lastChartCodes($)) await ensurePng($, code); // pre-warm (respects external gate)
+        for (const code of await lastChartCodes($)) await ensurePng($, code, next); // pre-warm (respects external gate)
         if (pngsDirty) {
           // Rows that drew without a ready PNG show the fallback; a redraw now
           // upgrades them to the image.
