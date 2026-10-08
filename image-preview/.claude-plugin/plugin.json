@@ -1,7 +1,7 @@
 {
   "name": "image-preview",
-  "version": "0.2.0",
-  "description": "Render image paths inline: a thumbnail in the user's prompt row (aspect-fill, max 10 rows) and in agent reply rows when the model mentions a path. Recognises a real file path ending in a supported image extension, or an [Image #N] token stored by the /image command.",
+  "version": "0.3.0",
+  "description": "Render image paths inline: a thumbnail in the user's prompt row (aspect-fill, max 10 rows) and in agent reply rows when the model mentions a path. Recognises a file path ending in a supported image extension (quoted or with escaped spaces too), or an [Image #N] token for a pasted picture.",
   "author": { "name": "ezou" },
   "types": "./types/index.d.ts"
 }
