@@ -11,10 +11,10 @@
 //
 // An image reference is a path ending in a supported extension (.png .jpg
 // .jpeg .gif .webp .bmp .tif .tiff .heic .heif .ico .svg), optionally with a
-// ?query/#fragment, or an [Image #N] token resolved against the gallery the
-// /image command stores. Each picture is decoded once (sips -> a bounded PNG
-// the terminal reads, as the mermaid pane hands its diagrams over) and
-// memoised by path.
+// ?query/#fragment, or an [Image #N] token for a picture pasted into the
+// prompt, read back from the transcript. Each picture is decoded once (sips ->
+// a bounded PNG the terminal reads, as the mermaid pane hands its diagrams
+// over) and memoised by path, or by content for a paste.
 const NS = { plugin: "image-preview", key: "state" };
 const TMP_DIR = "/tmp/image-preview";
 
@@ -26,15 +26,28 @@ const MAX_ROWS = 10;
 // A whitespace-delimited token ending in a supported image extension. The
 // capture is the bare path: an optional ?query/#fragment suffix (as in
 // /a/pic.png?w=100) is matched but left out of group 1, so the file the
-// decoder reads stays clean.
+// decoder reads stays clean. The path may sit in a code span, bold, or a
+// markdown link target, and may be followed by sentence punctuation; a path
+// never starts with the [, ( or * of that markup nor holds a link's "](", so
+// `[a](/b.png)` reads /b.png while app/[id]/hero.png stays whole. A
+// backslash-escaped space (as a file dropped on the terminal arrives) is part
+// of the path, never the start of one.
 const PATH_RE =
-  /(?:^|[\s"'([,{])([^\s"'<>]+?\.(?:png|jpg|jpeg|gif|webp|bmp|tif(?:f)?|heic|heif|ico|svg))(?:\?[^#\s"')]*)?(?:#[^\s"')]*)?(?=[\s"')\]}]|$)/gi;
-// An [Image #N] reference token; group 1 is its number.
+  /(?:^|(?<!\\)[\s"'`([,{*])([^\s"'<>`*([\]](?:\\ |(?!\]\()[^\s"'<>`])*?\.(?:png|jpg|jpeg|gif|webp|bmp|tif(?:f)?|heic|heif|ico|svg))(?:\?[^#\s"')]*)?(?:#[^\s"')]*)?(?=[\s"'`*)\]}]|[.,:;!?](?:[\s"'`*)\]}]|$)|$)/gi;
+// A quoted path with a space in it ("…", '…' or a code span) starting at /,
+// ~/, ./ or ../; group 2 is the path. Unquoted, a space ends a path.
+const QUOTED_RE =
+  /(["'`])((?:\/|~\/|\.\.?\/)(?=[^"'`\n<>]* )[^"'`\n<>]*?\.(?:png|jpg|jpeg|gif|webp|bmp|tif(?:f)?|heic|heif|ico|svg))\1/gi;
+// An [Image #N] token the engine puts in a prompt for a pasted picture; group
+// 1 is its number, counted across the session.
 const REF_RE = /\[Image\s*#(\d+)\s*\]/gi;
-const imgCache = new Map(); // resolved path -> { file, w, h } | "fail"
+const imgCache = new Map(); // resolved path or paste key -> { file, w, h } | "fail"
+const pastes = new Map(); // [Image #N] number -> { data, key }
+const pasteMisses = new Map(); // [Image #N] number -> when the transcript last lacked it
+const PASTE_RETRY_MS = 2000;
 
-function run($, cmd) {
-  return $.process.run(["/bin/sh", "-c", cmd]);
+function run($, cmd, stdin) {
+  return $.process.run(["/bin/sh", "-c", cmd], stdin === undefined ? undefined : { stdin });
 }
 
 function quote(p) {
@@ -48,10 +61,12 @@ function basename(p) {
   return m ? m[1] : clean;
 }
 
-// Absolute, or cwd-joined for relative references (.. stays intact).
-function resolvePath(token, cwd) {
+// Absolute, ~/ against HOME, or cwd-joined for relative references
+// (.. stays intact). A ~/ path with no HOME resolves to null: no guess.
+function resolvePath(token, cwd, home) {
   const t = token.trim();
   if (t.startsWith("/")) return t;
+  if (t.startsWith("~/")) return home ? resolvePath(t.slice(2), home) : null;
   const parts = `${String(cwd ?? "").replace(/\/+$/, "")}/${t.replace(/^\/+/, "")}`.split("/");
   const out = [];
   for (const p of parts) {
@@ -68,28 +83,54 @@ function hash(s) {
   return (h >>> 0).toString(36);
 }
 
+// Run sh, then read the PNG's size; { file, w, h } when both worked, else null.
+async function decodeWith($, sh, png, stdin) {
+  try {
+    const r = await run($, `${sh} && sips -g pixelWidth -g pixelHeight ${quote(png)}`, stdin);
+    const w = /pixelWidth:\s*(\d+)/.exec(r?.stdout ?? "");
+    const h = /pixelHeight:\s*(\d+)/.exec(r?.stdout ?? "");
+    if ((r?.exitCode ?? 1) === 0 && w && h) return { file: png, w: parseInt(w[1], 10), h: parseInt(h[1], 10) };
+  } catch {}
+  return null;
+}
+
 // Decode absPath to a bounded PNG the terminal reads by name. A missing or
 // non-image file fails sips, so we never render a broken box.
 async function decode($, absPath) {
   if (imgCache.has(absPath)) return imgCache.get(absPath);
-  let result = null;
-  try {
-    const png = `${TMP_DIR}/${hash(absPath)}.png`;
-    // -Z bounds the longest side and preserves aspect (-z would resample to an
-    // exact WxH box and distort every picture into a square).
-    const sh =
-      `mkdir -p ${quote(TMP_DIR)} && sips ${quote(absPath)} -Z 800 --out ${quote(png)} 2>/dev/null && ` +
-      `sips -g pixelWidth -g pixelHeight ${quote(png)}`;
-    const r = await run($, sh);
-    const w = /pixelWidth:\s*(\d+)/.exec(r?.stdout ?? "");
-    const h = /pixelHeight:\s*(\d+)/.exec(r?.stdout ?? "");
-    if ((r?.exitCode ?? 1) === 0 && w && h) {
-      result = { file: png, w: parseInt(w[1], 10), h: parseInt(h[1], 10) };
-    }
-  } catch {
-    result = null;
-  }
+  const png = `${TMP_DIR}/${hash(absPath)}.png`;
+  // -Z bounds the longest side and preserves aspect (-z would resample to an
+  // exact WxH box and distort every picture into a square).
+  const result = await decodeWith(
+    $,
+    `mkdir -p ${quote(TMP_DIR)} && sips ${quote(absPath)} -Z 800 --out ${quote(png)} 2>/dev/null`,
+    png,
+  );
   imgCache.set(absPath, result || "fail");
+  return result || "fail";
+}
+
+// Decode a pasted picture (base64 from the transcript) the same way. A paste
+// is the person's own content, so it goes to a directory only they can read
+// ($HOME/.cache/image-preview, mode 700, refused if not theirs or a symlink),
+// never the shared /tmp one; no HOME, no thumbnail.
+async function decodePaste($, paste, home) {
+  const { key } = paste;
+  if (imgCache.has(key)) return imgCache.get(key);
+  if (!home) return "fail";
+  const dir = `${home}/.cache/image-preview`;
+  const name = `${dir}/paste-${key}`;
+  const png = `${name}.png`;
+  const result = await decodeWith(
+    $,
+    `umask 077 && mkdir -p ${quote(dir)} && [ -O ${quote(dir)} ] && [ ! -L ${quote(dir)} ] && chmod 700 ${quote(dir)} && ` +
+      `/usr/bin/base64 -D -o ${quote(name)}.src && ` +
+      `sips ${quote(`${name}.src`)} -s format png -Z 800 --out ${quote(png)} >/dev/null 2>&1; ` +
+      `s=$?; rm -f ${quote(`${name}.src`)}; [ $s -eq 0 ]`,
+    png,
+    paste.data,
+  );
+  imgCache.set(key, result || "fail");
   return result || "fail";
 }
 
@@ -109,33 +150,85 @@ function fit(W, H, maxColumns, maxRows) {
   return { columns, rows };
 }
 
-// The image references in text, in document order: real paths and gallery
+// The image references in text, in document order: real paths and paste
 // tokens alike. The row's text is never rewritten, so nothing here carries the
 // surrounding prose.
-function imageRefs(text, cwd) {
+function imageRefs(text, cwd, home) {
   if (!text || typeof text !== "string") return [];
   const refs = [];
+  const quoted = []; // [start, end) of each quoted path, which PATH_RE skips
   let m;
+  QUOTED_RE.lastIndex = 0;
+  while ((m = QUOTED_RE.exec(text))) {
+    // Several paths in one quoted span are prose, not one path: leave them
+    // to PATH_RE.
+    if (/\.(?:png|jpg|jpeg|gif|webp|bmp|tif(?:f)?|heic|heif|ico|svg)\s/i.test(m[2])) continue;
+    quoted.push([m.index, m.index + m[0].length]);
+    const abs = resolvePath(m[2], cwd, home);
+    if (abs) refs.push({ at: m.index, abs, label: basename(m[2]) });
+  }
   PATH_RE.lastIndex = 0;
   while ((m = PATH_RE.exec(text))) {
-    refs.push({ abs: resolvePath(m[1], cwd), label: basename(m[1]) });
+    const at = m.index;
+    if (quoted.some(([s, e]) => at >= s && at < e)) continue;
+    const path = m[1].replace(/\\(.)/g, "$1");
+    const abs = resolvePath(path, cwd, home);
+    if (abs) refs.push({ at, abs, label: basename(path) });
   }
   REF_RE.lastIndex = 0;
   while ((m = REF_RE.exec(text))) {
-    refs.push({ abs: null, num: parseInt(m[1], 10), label: `[Image #${m[1]}]` });
+    refs.push({ at: m.index, abs: null, num: parseInt(m[1], 10), label: `[Image #${m[1]}]` });
   }
-  return refs;
+  return refs.sort((a, b) => a.at - b.at);
+}
+
+// Learn the pictures behind [Image #N] tokens from the transcript: in a user
+// message the engine puts one base64 image block per token, in token order.
+// A message whose tokens and images do not pair up one to one (a token typed
+// by hand) teaches nothing, so a token never draws someone else's picture.
+async function learnPastes($) {
+  let messages;
+  try {
+    messages = await $.session.messages({ as: "api" });
+  } catch {
+    return;
+  }
+  if (!Array.isArray(messages)) return;
+  for (const msg of messages) {
+    if (msg?.role !== "user" || !Array.isArray(msg.content)) continue;
+    const text = msg.content.filter((b) => b?.type === "text").map((b) => b.text ?? "").join("\n");
+    const images = msg.content.filter((b) => b?.type === "image" && b.source?.type === "base64" && b.source.data);
+    const nums = [...text.matchAll(REF_RE)].map((t) => parseInt(t[1], 10));
+    if (!nums.length || nums.length !== images.length) continue;
+    nums.forEach((n, i) => {
+      if (pastes.has(n)) return;
+      const data = images[i].source.data;
+      pastes.set(n, { data, key: `${hash(data)}-${data.length}` });
+    });
+  }
 }
 
 // One thumbnail per resolvable reference, in document order.
-async function collectThumbs($, text, gallery, C) {
+async function collectThumbs($, text, C) {
   const cwd = (await $.session.cwd().catch(() => "/")).trim();
+  const home = await $.env.get("HOME").catch(() => undefined);
+  const refs = imageRefs(text, cwd, home);
+  // Read the transcript only for a paste not yet learned, and retry one it
+  // lacked (a token typed by hand, a row drawn before its message is stored)
+  // at most every PASTE_RETRY_MS, not on every redraw.
+  const now = Date.now();
+  const missing = refs.filter((r) => r.abs === null && !pastes.has(r.num));
+  if (missing.some((r) => !(now - (pasteMisses.get(r.num) ?? -Infinity) < PASTE_RETRY_MS))) {
+    await learnPastes($);
+    for (const r of missing) if (!pastes.has(r.num)) pasteMisses.set(r.num, now);
+  }
   const nodes = [];
-  for (const ref of imageRefs(text, cwd)) {
-    const path = ref.abs ?? gallery[ref.num - 1] ?? null;
-    if (!path) continue;
-    const decoded = await decode($, path);
-    if (!decoded) continue;
+  for (const ref of refs) {
+    let decoded;
+    if (ref.abs !== null) decoded = await decode($, ref.abs);
+    else if (pastes.has(ref.num)) decoded = await decodePaste($, pastes.get(ref.num), home);
+    if (!decoded || decoded === "fail") continue;
+    const path = decoded.file;
     const sized = fit(decoded.w, decoded.h, C.maxColumns, MAX_ROWS);
     nodes.push(
       C.Box({
@@ -157,19 +250,16 @@ async function collectThumbs($, text, gallery, C) {
   return nodes;
 }
 
-// The mod's state: { gallery: string[], render: boolean } — render defaults
-// to true. Some render passes read state before it is available (the raw
+// The mod's state: { render: boolean } — defaults to true. Some render passes read state before it is available (the raw
 // answer comes back { version } with no value), which would flicker the
 // thumbnails; remember the last successfully read state and fall back to it.
-let lastState = { gallery: [], render: true };
+let lastState = { render: true };
 
 async function loadState($) {
   try {
     const { value } = await $.state.get(NS);
     const st = value?.state;
-    if (st && Array.isArray(st.gallery)) {
-      lastState = { gallery: st.gallery, render: st.render !== false };
-    }
+    if (st && typeof st === "object") lastState = { render: st.render !== false };
   } catch {}
   return lastState;
 }
@@ -191,7 +281,7 @@ async function renderRow($, e, next) {
 
   const maxColumns = e?.viewport?.columns ?? props.bodyColumns ?? 60;
   const C = { ...$.ui.resolve(e), maxColumns };
-  const nodes = await collectThumbs($, text, state.gallery, C);
+  const nodes = await collectThumbs($, text, C);
   if (!nodes.length) return next(e);
 
   const body = await next(e);
@@ -207,14 +297,14 @@ export function register(on) {
 
   on("ui.render", { component: "AssistantMessage" }, ($, e, next) => renderRow($, e, next));
 
-  // Store image paths so they can be referenced as [Image #N].
+  // /image-preview on|off toggles thumbnails for the session.
   on("session.start", async ($, e, next) => {
     const r = await next(e);
     try {
       await $.command.register({
-        name: "image",
-        description: "Store image paths; reference them in prompts as [Image #N] with an inline preview.",
-        argumentHint: "<path... | list | clear>",
+        name: "image-preview",
+        description: "Image previews: thumbnails on|off for this session",
+        argumentHint: "[on|off]",
       });
     } catch {
       // already registered after a hot reload
@@ -223,39 +313,19 @@ export function register(on) {
   });
 
   on("command.run", async ($, e, next) => {
-    if (e?.command !== "image") return next(e);
+    if (e?.command !== "image-preview") return next(e);
     const arg = (e?.args ?? "").trim();
-    if (!arg) {
-      return { text: "image: /image <path...> to store, [Image #N] to reference; /image on|off toggles thumbnails; /image list, /image clear." };
-    }
-    if (/^(list)$/.test(arg)) {
-      const { gallery } = await loadState($);
-      return { text: gallery.length ? gallery.map((p, i) => `[Image #${i + 1}]  ${p}`).join("\n") : "Gallery empty." };
-    }
+    let render;
     if (/^(on|off)$/.test(arg)) {
-      const cur = await loadState($);
-      const render = arg === "on";
-      await saveState($, { gallery: cur.gallery, render });
-      return { text: `image-preview rendering ${render ? "on" : "off"}.` };
+      render = arg === "on";
+      await saveState($, { render });
+    } else {
+      ({ render } = await loadState($));
     }
-    if (/^(clear|reset)$/.test(arg)) {
-      const cur = await loadState($);
-      await saveState($, { gallery: [], render: cur.render });
-      return { text: "image-preview gallery cleared." };
-    }
-
-    const cwd = (await $.session.cwd().catch(() => "/")).trim();
-    const { gallery, render } = await loadState($);
-    const added = [];
-    for (const raw of arg.split(/\s+/)) {
-      if (!raw) continue;
-      const abs = resolvePath(raw, cwd);
-      if (!gallery.includes(abs)) gallery.push(abs);
-      if (!added.includes(abs)) added.push(abs);
-    }
-    if (!added.length) return { text: "Nothing new to store." };
-    await saveState($, { gallery, render });
-    const tokens = added.map((p) => `[Image #${gallery.indexOf(p) + 1}]`);
-    return { text: `Stored ${added.length} image${added.length === 1 ? "" : "s"}:` + tokens.map((t) => `\n${t}`).join("") };
+    return {
+      text: render
+        ? "Thumbnails ON: image paths and pasted images draw inline. /image-preview off to switch."
+        : "Thumbnails OFF: rows draw as without the mod. /image-preview on to switch.",
+    };
   });
 }

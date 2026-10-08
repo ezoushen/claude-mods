@@ -15,9 +15,11 @@ Renders image paths inline, like the desktop GUI — a thumbnail in the prompt r
 
 - **prompt rows** — an image path in the sent prompt draws an aspect-fill thumbnail (never taller than 10 rows)
 - **reply rows** — a path the model mentions draws the same thumbnail in the reply row
-- `/image <path...>` stores paths, referenced as `[Image #N]`; `/image off` is a complete no-op, `/image list` / `/image clear` manage the gallery
+- **pasted images** — an `[Image #N]` you pasted draws that picture
+- paths may be `~/`-relative, wrapped in backticks, bold or a markdown link, quoted (`"~/My Pics/a b.png"`) or carry escaped spaces (`Screen\ Shot.png`)
+- `/image-preview off` is a complete no-op; `/image-preview on` turns it back on
 
-Thumbnails are real PNG files (`sips -Z 800`) stored under `/tmp/image-preview/`; graphics terminals (kitty/Ghostty) paint actual pixels, other terminals draw the file name as alt text.
+Thumbnails are real PNG files (`sips -Z 800`): from files under `/tmp/image-preview/`, from pastes under `~/.cache/image-preview/` (private, mode 700); graphics terminals (kitty/Ghostty) paint actual pixels, other terminals draw the file name as alt text.
 
 ### mermaid-pane
 
