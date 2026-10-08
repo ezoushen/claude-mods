@@ -6,8 +6,9 @@ type AnyHook = (...args: any[]) => unknown;
 const mem: Record<string, unknown> = {};
 const WORK = "/work";
 const HOME = "/Users/u";
-// Every command name the mod registered.
+// Every command name the mod registered, and the argument hint it gave.
 const registered: string[] = [];
+const hints: string[] = [];
 // Every shell command the mod ran, so a test can see which file sips read.
 const commands: string[] = [];
 // What $.session.messages({ as: "api" }) answers: the transcript as the model
@@ -23,6 +24,7 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, envFlag = "1", ho
   apiMessages = [];
   apiReads = 0;
   registered.length = 0;
+  hints.length = 0;
   on("session.start", () => ({ cwd: WORK }));
   on("session.messages", (_$: unknown, e: any) => {
     if (e?.as === "api") apiReads++;
@@ -42,7 +44,7 @@ function stubWorld(on: (event: string, hook: AnyHook) => void, envFlag = "1", ho
     return { value: { isSet: true, version: 0 } };
   });
 
-  on("command.register", (_$: unknown, e: any) => { registered.push(e?.name); return { value: { command: e?.name } }; });
+  on("command.register", (_$: unknown, e: any) => { registered.push(e?.name); hints.push(e?.argumentHint); return { value: { command: e?.name } }; });
   on("ui.invalidate", () => ({ value: {} }));
 
   // Rendering is opted in via the env flag (the same one the engine's
@@ -265,7 +267,7 @@ describe("image-preview", () => {
 
     expect(registered).toEqual(["image-preview"]);
     const r = await runToggle($, "off");
-    expect((r as any).text).toMatch(/off/);
+    expect((r as any).text).toMatch(/OFF/);
     expect((mem["image-preview:state"] as any).state.render).toBe(false);
   });
 
@@ -348,6 +350,19 @@ describe("image-preview", () => {
       await mount($, "UserMessage", { text: "typed [Image #7] by hand", origin: { kind: "composer" }, isExpanded: true }, { columns: 120, rows: 40 });
     }
     expect(apiReads).toBeLessThanOrEqual(1);
+  });
+
+  // The same shape as /mermaid: a [a|b] argument hint, and every reply names
+  // the state and ends with the command that switches it.
+  test("/image-preview hints like /mermaid", async ($, on) => {
+    stubWorld(on);
+    on("ui.render", (_$: unknown, _e: any) => ({ type: "Text", props: {}, children: [] }));
+    await $.session.start({ surface: "terminal", isInteractive: true, cwd: WORK });
+
+    expect(hints).toEqual(["[on|off]"]);
+    expect(((await runToggle($, "off")) as any).text).toMatch(/OFF.*\/image-preview on to switch\.$/);
+    expect(((await runToggle($, "")) as any).text).toMatch(/OFF.*\/image-preview on to switch\.$/);
+    expect(((await runToggle($, "on")) as any).text).toMatch(/ON.*\/image-preview off to switch\.$/);
   });
 
 });

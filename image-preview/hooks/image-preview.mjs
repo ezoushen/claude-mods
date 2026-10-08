@@ -303,8 +303,8 @@ export function register(on) {
     try {
       await $.command.register({
         name: "image-preview",
-        description: "Turn inline image thumbnails on or off for this session.",
-        argumentHint: "<on | off>",
+        description: "Image previews: thumbnails on|off for this session",
+        argumentHint: "[on|off]",
       });
     } catch {
       // already registered after a hot reload
@@ -315,12 +315,17 @@ export function register(on) {
   on("command.run", async ($, e, next) => {
     if (e?.command !== "image-preview") return next(e);
     const arg = (e?.args ?? "").trim();
+    let render;
     if (/^(on|off)$/.test(arg)) {
-      const render = arg === "on";
+      render = arg === "on";
       await saveState($, { render });
-      return { text: `image-preview rendering ${render ? "on" : "off"}.` };
+    } else {
+      ({ render } = await loadState($));
     }
-    const { render } = await loadState($);
-    return { text: `image-preview rendering is ${render ? "on" : "off"}; /image-preview on|off toggles it.` };
+    return {
+      text: render
+        ? "Thumbnails ON: image paths and pasted images draw inline. /image-preview off to switch."
+        : "Thumbnails OFF: rows draw as without the mod. /image-preview on to switch.",
+    };
   });
 }
