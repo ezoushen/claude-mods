@@ -336,3 +336,34 @@ only, so a broad setting never loosens a precise rule.
 sha256 `e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf`.
 Every generated rule carries its upstream id and an anchored source URL, checked
 by `tools/check-rules.mjs` against `RULES.md`.
+
+---
+
+## Placeholder ergonomics: one skill, two refusals
+
+**Decision:** teach the model what a placeholder means through a skill and a
+standing notice, and enforce the two cases that must not depend on the model
+reading either, through hooks.
+
+The asymmetry is the point. A skill is advisory: Claude invokes it when its
+description matches, and can miss the exact turn where a placeholder appears —
+Claude Code's own documentation says a rule that must hold every time belongs in
+a hook, not a skill. So the skill carries the *reasoning* (three origins, the
+route that works, the list of moves that never do), and hooks carry the two
+cases where being wrong is destructive:
+
+- A secret redacted out of the user's message annotates that prompt with what
+  happened and what to do instead, because the failure mode is the model either
+  asking for the value to be pasted back or inventing one.
+- `Bash`, `WebFetch` and `WebSearch` carrying a placeholder are refused. Before
+  this, such a call *ran* with `[REDACTED:…#…]` as literal text: it succeeded,
+  changed nothing, and reported success — worse than a refusal, because the model
+  reads it as done. Rehydration stays scoped to the three write-path tools
+  (§8); the guard closes the silent-wrong-answer hole that scoping opened.
+
+**What is deliberately not claimed:** the refusal forces the tool call to stop,
+not the model's prose. "Stop and tell the user" is an instruction, not a
+guarantee; the enforcement is that continuing requires acknowledging the
+refusal. Guarding by tool name also means an MCP tool that shells out or fetches
+a URL is not covered — it is neither rehydrated nor refused, and that gap is
+recorded rather than implied away.

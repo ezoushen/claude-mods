@@ -4,7 +4,7 @@
     "name": "ezoushen"
   },
   "metadata": {
-    "description": "Claude Code mods by ezoushen \u2014 plugins whose behavior lives in hooks modules.",
+    "description": "Claude Code mods by ezoushen — plugins whose behavior lives in hooks modules.",
     "version": "1.0.0"
   },
   "plugins": [
@@ -28,8 +28,8 @@
     },
     {
       "name": "prompt-redact",
-      "description": "Replaces secrets and credentials with stable placeholders inside Claude Code before the model or the session file ever sees them \u2014 prompts, tool results, replies, attachments and compaction summaries \u2014 and restores real values only in Edit/Write/NotebookEdit arguments. 220-rule corpus plus checksum detectors, a benign-shape allowlist, fail-closed scanning and a /redact pane. No network, no subprocess, no model call.",
-      "version": "0.1.0",
+      "description": "Replaces secrets and credentials with stable placeholders inside Claude Code before the model or the session file ever sees them — prompts, tool results, replies, attachments and compaction summaries — and restores real values only in Edit/Write/NotebookEdit arguments. 220-rule corpus plus checksum detectors, a benign-shape allowlist, fail-closed scanning and a /redact pane. No network, no subprocess, no model call.",
+      "version": "0.2.0",
       "source": "./prompt-redact",
       "author": {
         "name": "ezoushen"
