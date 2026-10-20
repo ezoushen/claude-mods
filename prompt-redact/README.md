@@ -145,7 +145,9 @@ Three things these paths do **not** permit:
   restored placeholder from becoming an exfiltration primitive). A literal
   secret typed into a `Bash` command becomes a placeholder before the shell
   sees it, so an inline `curl -H "Authorization: Bearer …"` with the secret
-  cannot work — the command would send the placeholder.
+  cannot work — the command would carry the placeholder. That call is now
+  refused outright rather than run as a silent no-op (see *Teaching the model
+  what a placeholder means*).
 - **A credential that exists only in prompt text cannot be used by `Bash` at
   all.** It must live in the environment before launch (path 1) or be
   materialised on disk (path 3). Handing the value to Claude in prose buys
@@ -159,6 +161,35 @@ Three things these paths do **not** permit:
 Captures: paths 1 and 2 in `reports/evidence/06-operator-capture.txt` and
 session `435fbaf4-ee44-45a4-b723-9556a00f5077.jsonl`; path 3 in session
 `abb84738-c36b-4c70-bcc3-86bf25c64e7f.jsonl`.
+
+## Teaching the model what a placeholder means
+
+A placeholder is opaque, and the model has to know both what it is and what it
+cannot do with it. Three layers, weakest to strongest:
+
+1. **A skill** — `skills/redacted-values/SKILL.md`, also runnable as
+   `/prompt-redact:redacted-values`. It sorts the three origins (the user's own
+   message, tool output, the model's own reply) and states the correct move for
+   each. Advisory by nature: Claude invokes it when the description matches, and
+   can miss the turn it matters.
+2. **A standing notice** — `prompt.compose` / `prompt.section` append the opaque
+   description to the system prompt, so the model is told on every turn what the
+   placeholders are, whichever of the two hooks the engine reaches.
+3. **Two deterministic hooks** — these do not depend on the model reading
+   anything:
+   - On the turn a secret is redacted out of the **user's** message, the injected
+     context says so, tells the model to stop rather than work around it, forbids
+     asking the user to paste the value, and gives the route that works
+     (`set -a; . ./.env; set +a`, or reference by variable name).
+   - `tool.call` **refuses** a `Bash`, `WebFetch` or `WebSearch` call whose
+     arguments carry a placeholder. Those tools are deliberately never
+     rehydrated, so without this a command would run with `[REDACTED:…#…]` as
+     literal text and report success. The refusal names the file-loading route.
+
+The honest split: "stop and tell the user" cannot be forced as prose — a hook
+cannot dictate the model's words. What *can* be forced is the refusal, and a
+refusal with the instruction attached leaves the model no way to continue
+without surfacing it to the user.
 
 ## Known limitation
 

@@ -48,6 +48,14 @@ const RESERVED = new Set(["tool", "tool_use_id", "agentId"]);
 /** Tools whose arguments may receive a real value back. */
 const REHYDRATE_TOOLS = ["Edit", "Write", "NotebookEdit"] as const;
 
+/**
+ * Tools that must never carry a placeholder onward. Rehydration is deliberately
+ * absent here, so a placeholder that reached one of these would run or travel as
+ * literal text: the command "succeeds" while doing nothing, which is worse than
+ * refusing. A refusal can carry the route that works; a silent no-op cannot.
+ */
+const GUARDED_TOOLS = ["Bash", "WebFetch", "WebSearch"] as const;
+
 const OPAQUE_NOTICE =
   "\n\nSome values in this conversation appear as `[REDACTED:<LABEL>#<hash>]`. " +
   "They are opaque placeholders the session minted for credentials, API keys and " +
@@ -596,7 +604,15 @@ export function register(on: any, options: Record<string, unknown>): void {
       // delivery channel that cannot be short-circuited by another plugin, so
       // the model learns what it is looking at on the very turn it appears.
       const existing = Array.isArray(e.context) ? (e.context as readonly string[]) : [];
-      const note = `prompt-redact hid ${result.hits.length} value(s) in this prompt (${labels}). They appear below as opaque [REDACTED:<LABEL>#<hash>] placeholders: reference them, and copy them into Edit/Write/NotebookEdit arguments where the real value is restored, but never ask for the underlying value.`;
+      const note =
+        `prompt-redact hid ${result.hits.length} value(s) in this message (${labels}). ` +
+        `They appear below as opaque [REDACTED:<LABEL>#<hash>] placeholders, and they came from the user's own ` +
+        `message, so stop rather than work around them: do not guess, decode or reconstruct the value, and do not ` +
+        `ask the user to paste it into the conversation. Tell them it was redacted before it reached you, then give ` +
+        `them the route that works: keep the secret in a file (for example .env) and load it with ` +
+        `\`set -a; . ./.env; set +a\`, or refer to it by variable name. Copy a placeholder verbatim into ` +
+        `Edit/Write/NotebookEdit arguments only when the user wants the value written somewhere: prompt-redact ` +
+        `restores the real value on the way to disk.`;
       return next({ ...e, text: result.text, context: [...existing, note] });
     } catch {
       // Fail closed. A dropped prompt is visible and recoverable; a leaked key is
@@ -723,6 +739,40 @@ export function register(on: any, options: Record<string, unknown>): void {
       }
       if (restored > 0) await setRestored($, (await getRestored($)) + restored);
       return next(rewritten);
+    });
+  }
+
+  // --- tool.call: refuse a placeholder on tools that never receive real values
+  // Bash and the network tools are absent from REHYDRATE_TOOLS on purpose: that
+  // absence is what stops a model-written command or URL from becoming an
+  // exfiltration path. The cost is that a placeholder reaches them as literal
+  // text, so a command that "works" silently does nothing. Refusing is the honest
+  // move, and the refusal carries the route that does work.
+  for (const tool of GUARDED_TOOLS) {
+    on("tool.call", { tool }, async ($: any, e: any, next: (e: any) => unknown) => {
+      await markObserved($, "tool.call");
+      const { enabled } = await posture($, cfg);
+      if (!enabled) return next(e);
+      const vault = await getVault($);
+      // No vault means no placeholder of ours is in play: nothing to refuse.
+      if (Object.keys(vault).length === 0) return next(e);
+      let carried = 0;
+      for (const [key, value] of Object.entries(e as Record<string, unknown>)) {
+        if (RESERVED.has(key)) continue;
+        const parsed = asRehydratable(value);
+        if (parsed === undefined) continue;
+        carried += placeholdersIn(parsed);
+      }
+      if (carried === 0) return next(e);
+      return {
+        deny:
+          `prompt-redact: this ${tool} call carries ${carried} redacted placeholder(s). ` +
+          `${tool} never receives real values — that rule is what keeps a model-written command or URL from ` +
+          `becoming an exfiltration path — so this call would have run with [REDACTED:...] as literal text, ` +
+          `not as the secret. Nothing was executed. Use the value without typing it: keep the secret in a file ` +
+          `and load it (\`set -a; . ./.env; set +a\`) then reference $NAME, or ask the user where the value ` +
+          `should be supplied. Do not ask them to paste it into the conversation.`,
+      };
     });
   }
 
@@ -885,14 +935,15 @@ export function register(on: any, options: Record<string, unknown>): void {
         }
         return node;
       };
-      const scrubField = (value: unknown): unknown => {
-        const parsed = asRehydratable(value);
-        // Not JSON-shaped (a Buffer, a function): leave it to the row-level pass.
-        return parsed === undefined ? value : scrubNode(parsed);
-      };
       const rewritten = { ...(answer as Record<string, unknown>) };
-      if ("text" in rewritten) rewritten.text = scrubField(rewritten.text);
-      rewritten.result = scrubField(rewritten.result);
+      // Parse each field at its boundary. A field that is not JSON-shaped (a
+      // Buffer, a function) has no parsed form, so it is left alone for the
+      // row-level pass rather than coerced into one.
+      for (const field of ["text", "result"] as const) {
+        if (!(field in rewritten)) continue;
+        const parsed = asRehydratable(rewritten[field]);
+        if (parsed !== undefined) rewritten[field] = scrubNode(parsed);
+      }
       if (hits.length > 0) await recordHits($, hits);
       return rewritten;
     } catch {

@@ -153,7 +153,7 @@ describe("fail-closed", () => {
       return { value: { isSet: true, version: 0 } };
     });
     // Stub beneath the mod: the bottom of the chain echoes the row it keeps.
-    on("session.append", (_$: unknown, e: unknown, next: (e: unknown) => unknown) => next(e));
+    on("session.append", (_$: any, e: any, next: (e: any) => any) => next(e));
 
     mem["prompt-redact:salt"] = SALT;
     mem["prompt-redact:enabled"] = true;
@@ -521,7 +521,7 @@ describe("row walking edge cases", () => {
 
 // --- helpers for the register-level suites -----------------------------------
 
-type Captured = { event: string; match?: Record<string, unknown>; handler: ($: any, e: any, next: (e: any) => unknown) => unknown };
+type Captured = { event: string; match?: Record<string, unknown>; handler: ($: any, e: any, next?: (e: any) => unknown) => unknown };
 
 /**
  * Capture what `register` wires, without an engine. The point of these tests is
@@ -684,15 +684,18 @@ describe("register: the interception surface", () => {
   const find = (event: string, tool?: string) =>
     captured.find((c) => c.event === event && (tool === undefined ? c.match === undefined || c.match.tool === undefined : c.match?.tool === tool));
 
-  test("only the three file-editing tools are wired for rehydration", () => {
+  test("rehydration covers the file-editing tools, and the outbound tools are guarded instead", () => {
     const tools = captured
       .filter((c) => c.event === "tool.call" && typeof c.match?.tool === "string")
       .map((c) => c.match?.tool)
       .sort();
-    expect(tools).toEqual(["Edit", "NotebookEdit", "Write"]);
-    // The policy, stated as an absence: there is no handler that could hand a
-    // real value to a shell command.
-    expect(tools.includes("Bash")).toBe(false);
+    expect(tools).toEqual(["Bash", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Write"]);
+    // The policy, stated as a partition: a tool is either rehydrated (the three
+    // write paths) or refused (the shell and the network). Never both, because a
+    // tool that both restored a value and reached the network is exfiltration.
+    const rehydrating = ["Edit", "NotebookEdit", "Write"];
+    const guarded = ["Bash", "WebFetch", "WebSearch"];
+    expect(rehydrating.filter((tool) => guarded.includes(tool))).toEqual([]);
   });
 
   test("Write arguments are rehydrated, and Bash arguments never are", async () => {
