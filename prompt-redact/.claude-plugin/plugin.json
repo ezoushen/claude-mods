@@ -1,6 +1,6 @@
 {
   "name": "prompt-redact",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Replaces secrets and credentials with stable placeholders inside Claude Code before the model or the session file ever sees them — prompts, tool results, replies and compaction summaries — and restores real values only in Edit/Write/NotebookEdit arguments.",
   "author": {
     "name": "ezoushen"

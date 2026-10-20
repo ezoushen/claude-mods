@@ -367,3 +367,22 @@ guarantee; the enforcement is that continuing requires acknowledging the
 refusal. Guarding by tool name also means an MCP tool that shells out or fetches
 a URL is not covered — it is neither rehydrated nor refused, and that gap is
 recorded rather than implied away.
+
+---
+
+## Silent start
+
+**Decision:** log the readiness line only when the mod loaded something beyond
+the built-in corpus; an ordinary session starts with no output.
+
+The banner was unconditional, which made it noise on every start. But it existed
+for a reason: on an account where a managed policy plugin seats outermost, hooks
+can be skipped, so a positive "I loaded" line is the only in-band evidence the
+mod is live. Removing it outright would have traded noise for silence about a
+real coverage question, so the line survives for the cases where the answer is
+not the obvious one — local rules or the optional classifier — and `/redact`
+(including `/redact why`, which lists which interception hooks actually arrived)
+stays the on-demand check.
+
+The platform's "hook was skipped" notice is not ours to suppress: it is written
+by Claude Code when an outer plugin answers an event without calling `next`.
