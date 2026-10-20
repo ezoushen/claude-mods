@@ -557,15 +557,25 @@ export function register(on: any, options: Record<string, unknown>): void {
     }
 
     let probed = "built-in 220-rule corpus";
+    // Anything the person configured is worth announcing; the shipped baseline
+    // is not. A clean session should start silently -- an unconditional banner
+    // on every start is noise, and `/redact` is the on-demand answer.
+    let custom = false;
     try {
       const found = await localRules($);
-      if (found && found.length > 0) probed = `built-in corpus + ${found.length} local rule(s)`;
+      if (found && found.length > 0) {
+        probed = `built-in corpus + ${found.length} local rule(s)`;
+        custom = true;
+      }
     } catch {
       probed = "built-in 220-rule corpus";
     }
     try {
       const model = await localClassifier($);
-      if (model) probed += ` + L2 local classifier (threshold ${model.threshold})`;
+      if (model) {
+        probed += ` + L2 local classifier (threshold ${model.threshold})`;
+        custom = true;
+      }
     } catch {
       // the ladder simply stays at L1
     }
@@ -578,10 +588,12 @@ export function register(on: any, options: Record<string, unknown>): void {
     } catch {
       // a duplicate registration on hot reload is not fatal
     }
-    try {
-      $.ui.log(`prompt-redact ready — ${probed}`);
-    } catch {
-      // drawing is best-effort
+    if (custom) {
+      try {
+        $.ui.log(`prompt-redact ready — ${probed}`);
+      } catch {
+        // drawing is best-effort
+      }
     }
     return answer ?? { cwd: String(e.cwd ?? "") };
   });

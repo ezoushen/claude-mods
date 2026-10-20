@@ -29,7 +29,7 @@
     {
       "name": "prompt-redact",
       "description": "Replaces secrets and credentials with stable placeholders inside Claude Code before the model or the session file ever sees them — prompts, tool results, replies, attachments and compaction summaries — and restores real values only in Edit/Write/NotebookEdit arguments. 220-rule corpus plus checksum detectors, a benign-shape allowlist, fail-closed scanning and a /redact pane. No network, no subprocess, no model call.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "source": "./prompt-redact",
       "author": {
         "name": "ezoushen"

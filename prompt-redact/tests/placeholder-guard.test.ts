@@ -22,8 +22,9 @@ function captureHandlers(options: Record<string, unknown> = {}): Captured[] {
   return captured;
 }
 
-function fakeEngine(initial: Record<string, unknown>) {
+function fakeEngine(initial: Record<string, unknown>, files: Record<string, string> = {}) {
   const store: Record<string, unknown> = { ...initial };
+  const logs: string[] = [];
   const $ = {
     state: {
       get: async (e: { plugin: string; key: string }) => ({ value: store[`${e.plugin}:${e.key}`], version: 0 }),
@@ -32,11 +33,14 @@ function fakeEngine(initial: Record<string, unknown>) {
         return { isSet: true, version: 1 };
       },
     },
-    fs: { exists: async () => false, read: async () => "" },
-    ui: { log: () => undefined },
+    fs: {
+      exists: async (path: string) => Object.prototype.hasOwnProperty.call(files, path),
+      read: async (path: string) => files[path] ?? "",
+    },
+    ui: { log: (message: string) => logs.push(message) },
     command: { register: async () => ({ registered: true }) },
   };
-  return { $, store };
+  return { $, store, logs };
 }
 
 const sessionState = {
@@ -142,6 +146,26 @@ describe("placeholder guard on non-rehydrating tools", () => {
     };
     expect(out.deny).toBeUndefined();
     expect(out.old_string).toBe(GHP_CANARY);
+  });
+});
+
+describe("quiet start on a clean session", () => {
+  const captured = captureHandlers();
+  const start = captured.find((c) => c.event === "session.start");
+
+  test("an ordinary session logs nothing at all", async () => {
+    const { $, logs } = fakeEngine(sessionState);
+    await start!.handler($, { cwd: "/tmp" }, (e: any) => ({ cwd: e.cwd }));
+    expect(logs).toEqual([]);
+  });
+
+  test("a session with local rules still announces what it loaded", async () => {
+    // Documented format: one `LABEL <javascript-regex>` per line.
+    const rules = "LOCAL_TEST LOCAL_[A-Z0-9]{8}\n";
+    const { $, logs } = fakeEngine(sessionState, { ".claude/prompt-redact.rules": rules });
+    await start!.handler($, { cwd: "/tmp" }, (e: any) => ({ cwd: e.cwd }));
+    expect(logs.join("\n")).toContain("prompt-redact ready");
+    expect(logs.join("\n")).toContain("local rule");
   });
 });
 

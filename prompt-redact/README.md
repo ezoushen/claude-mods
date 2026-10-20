@@ -60,6 +60,9 @@ Five layers, auto-selected per machine and per row:
    deployment vocabulary and by value shape.
 5. **Local rules** — an optional `.claude/prompt-redact.rules` (one
    `LABEL <javascript-regex>` per line) is probed at session start and merged.
+   A session that only has the built-in corpus starts silently; the readiness
+   line appears when local rules or the optional classifier are loaded, and
+   `/redact` answers on demand.
 
 **Allowlisted** (left untouched, because redacting them breaks the task): git and
 content hashes, UUID/ULID/ObjectId, lockfile integrity, bcrypt, SSH *public*
