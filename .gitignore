@@ -10,3 +10,7 @@ package-lock.json
 
 # local render caches
 tmp/
+
+# dispatch state (worktrees and local tickets)
+.worktrees/
+.scratch/

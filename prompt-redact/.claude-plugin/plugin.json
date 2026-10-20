@@ -1,0 +1,46 @@
+{
+  "name": "prompt-redact",
+  "version": "0.1.0",
+  "description": "Replaces secrets and credentials with stable placeholders inside Claude Code before the model or the session file ever sees them \u2014 prompts, tool results, replies and compaction summaries \u2014 and restores real values only in Edit/Write/NotebookEdit arguments.",
+  "author": {
+    "name": "ezoushen"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enabled",
+      "description": "Scan and redact. Off leaves everything untouched; /redact on restores it.",
+      "default": true
+    },
+    "tier": {
+      "type": "string",
+      "title": "Aggressiveness",
+      "description": "strict redacts anything suspicious, balanced is the default, precision only clear-cut secrets.",
+      "default": "balanced",
+      "options": [
+        "strict",
+        "balanced",
+        "precision"
+      ]
+    },
+    "minEntropy": {
+      "type": "number",
+      "title": "Entropy floor",
+      "description": "Minimum Shannon entropy for the generic keyword=value detector. Lower catches more and over-redacts more.",
+      "default": 3.2
+    },
+    "scanBudgetMs": {
+      "type": "number",
+      "title": "Scan budget (ms)",
+      "description": "Wall-clock ceiling for scanning one row. A row that overruns it is withheld rather than sent unscanned.",
+      "default": 1500
+    },
+    "disabledRules": {
+      "type": "string",
+      "title": "Disabled rules",
+      "description": "Comma-separated rule ids to switch off, out of the shipped corpus (see RULES.md). Removing a noisy rule is the other half of adding one via .claude/prompt-redact.rules. /redact rule off <id> does the same for this session.",
+      "default": ""
+    }
+  }
+}
