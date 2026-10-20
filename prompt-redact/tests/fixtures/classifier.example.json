@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "bias": -1.2,
+  "threshold": 0.5,
+  "features": {
+    "entropy": 1.2,
+    "digit": 3,
+    "symbol": 1.2,
+    "prefixed": 1,
+    "length": 0.4,
+    "wordlike": -2.5
+  }
+}

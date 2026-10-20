@@ -6,6 +6,7 @@ Claude Code mods by [ezoushen](https://github.com/ezoushen) — plugins whose be
 | --- | --- | --- |
 | [mermaid-pane](mermaid-pane/) | Claude Code ≥ 2.1.287; renderers optional (`/mermaid setup` installs beautiful-mermaid via bun or npm, termaid via pip and mermaid-cli via npm); image pixels draw in kitty/Ghostty (elsewhere it degrades to ASCII art) | `/plugin marketplace add ezoushen/claude-mods` then `/plugin install mermaid-pane@claude-mods` |
 | [image-preview](image-preview/) | Claude Code ≥ 2.1.287; works on any terminal (draws the filename as alt-text on non-graphic ones) | `/plugin marketplace add ezoushen/claude-mods` then `/plugin install image-preview@claude-mods` |
+| [prompt-redact](prompt-redact/) | Claude Code ≥ 2.1.287; no network, no subprocess, no model call | `/plugin marketplace add ezoushen/claude-mods` then `/plugin install prompt-redact@claude-mods` |
 
 ## Mods
 
@@ -30,6 +31,18 @@ Renders ```` ```mermaid ```` blocks from the conversation inline, with the chart
 - **external rendering** — OFF by default; `/mermaid external on` opts into mermaid.ink when local PNG fails (sends full diagram source; persists). Image mode alone is not consent
 - `/mermaid ascii|image` picks the mode · `/mermaid external on|off` gates remote · bare `/mermaid` reports mode, external setting, and renderer status
 - `/mermaid setup` installs the optional renderers in the background (see the mod's README)
+
+### prompt-redact
+
+Puts a placeholder where a secret used to be — before the model or the session file sees it — and puts the real value back only where an edit tool writes it:
+
+- **prompts and tool output** — a typed secret, or a key in a file read, a shell result or an MCP result, becomes `[REDACTED:LABEL#hash]` before the model reads it; the transcript keeps the placeholder
+- **edits** — the real value is restored only inside `Edit`, `Write` and `NotebookEdit` arguments, so an edit to a line holding a real key still matches the file on disk; `Bash` never receives a real value
+- **detection** — structural checks (PEM, JWT, IBAN, card, SSN), a gitleaks-derived rule corpus, and an allowlist for shapes redacting would break (hashes, UUIDs, public keys); a scan that throws withholds the row instead of passing it
+- `/redact` reports counts by label, restore count and vault size · `/redact on|off`, `tier`, `allow`, `deny`, `why`
+- no network, no subprocess, no model call
+
+**Exposure:** placeholders protect the transcript and the model, never the disk. A file an edit tool writes holds the real value in plaintext — `chmod 600` it, list it in `.gitignore`, and delete it when the task is done. An organization account also skips several of this mod's hooks; the mod's README states which carriers remain covered there.
 
 ## Install
 
