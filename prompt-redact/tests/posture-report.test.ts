@@ -238,3 +238,24 @@ describe("removable detector ids", () => {
     expect(typo.text).toContain("no such rule");
   });
 });
+
+describe("guardedDeployment", () => {
+  const GUARD_FORWARDED = ["prompt.attachment", "prompt.compose", "prompt.section"];
+
+  test("off by default: the opaque notice and attachment scan stay registered", () => {
+    const events = captureHandlers({}).map((c) => c.event);
+    for (const event of GUARD_FORWARDED) expect(events).toContain(event);
+  });
+
+  test("on: the hooks a guard forwards past the user tier are never registered", () => {
+    const events = captureHandlers({ guardedDeployment: true }).map((c) => c.event);
+    for (const event of GUARD_FORWARDED) expect(events).not.toContain(event);
+  });
+
+  test("on: everything reachable at this tier is still wired", () => {
+    const events = captureHandlers({ guardedDeployment: true }).map((c) => c.event);
+    for (const event of ["session.start", "prompt.submit", "session.append", "tool.call", "command.run", "ui.render"]) {
+      expect(events).toContain(event);
+    }
+  });
+});

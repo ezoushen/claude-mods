@@ -1,6 +1,6 @@
 {
   "name": "prompt-redact",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Replaces secrets and credentials with stable placeholders inside Claude Code before the model or the session file ever sees them — prompts, tool results and replies, plus attachments and compaction summaries where the platform lets this mod see them — and restores real values only in Edit/Write/NotebookEdit arguments. 220-rule corpus plus checksum detectors, a benign-shape allowlist, fail-closed scanning, a /redact pane and a redacted-values skill. No network, no subprocess, no model call.",
   "author": {
     "name": "ezoushen"
@@ -41,6 +41,12 @@
       "title": "Disabled rules",
       "description": "Comma-separated rule ids to switch off, out of the shipped corpus (see RULES.md). Removing a noisy rule is the other half of adding one via .claude/prompt-redact.rules. /redact rule off <id> does the same for this session.",
       "default": ""
+    },
+    "guardedDeployment": {
+      "type": "boolean",
+      "title": "Behind an organization guard",
+      "description": "Set when a policy mod (such as cc-plugin-sec-default) seats itself outermost and forwards prompt.attachment, prompt.compose and prompt.section past the user tier. On, this plugin does not register those three hooks: they could never run there, and Claude Code would print a skipped-hook line for each. Leave off on a machine with no guard, where they carry the opaque notice and the attachment scan.",
+      "default": false
     }
   }
 }

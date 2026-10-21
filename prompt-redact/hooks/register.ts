@@ -605,6 +605,15 @@ export function register(on: any, options: Record<string, unknown>): void {
     disabledRules: configuredDisabled,
   };
 
+  // A policy mod that seats itself outermost (managed settings, Team and
+  // Enterprise organizations) forwards these events past the user tier. On that
+  // machine the three hooks below can never run, and registering them makes
+  // Claude Code announce a skipped hook for each on every session. A deployment
+  // behind a guard opts out of them at load; with the option unset they stay,
+  // because on a machine with no guard they carry the opaque notice and the
+  // attachment scan.
+  const guardedDeployment = options.guardedDeployment === true;
+
   // --- session.start: initial readings, capability probe, command ------------
   on("session.start", async ($: any, e: any, next: (e: any) => unknown) => {
     // `next(e)` resolves to the session's `{ cwd }`, and this event's hook must
@@ -760,6 +769,7 @@ export function register(on: any, options: Record<string, unknown>): void {
     });
   }
 
+  if (!guardedDeployment) {
   // --- prompt.attachment: every message the engine injects on its own ------
   // This is the event that sees an injected message as a request is about to
   // carry it, and `e.text` is exactly "what the model reads".
@@ -846,6 +856,7 @@ export function register(on: any, options: Record<string, unknown>): void {
     await setNoticeShown($, true);
     return { text: text + OPAQUE_NOTICE };
   });
+  }
 
   // --- tool.call: rehydrate ONLY the three file-editing tools ---------------
   for (const tool of REHYDRATE_TOOLS) {

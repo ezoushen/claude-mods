@@ -218,6 +218,20 @@ engine has no skipped hook of this plugin's to report. The injected doors were
 never readable at this tier, so no carrier is lost. A deployment seated above the
 guard still reads them, and the injected-door code paths remain for that case.
 
+**Since 0.3.3, `guardedDeployment` removes the remaining three.** At this tier
+the guard also forwards `prompt.attachment`, `prompt.compose` and
+`prompt.section`, so registering them produced one line each at startup for
+hooks that could never run. Set `guardedDeployment: true` in the plugin's
+config (settings `pluginConfigs`, or the org's managed settings) and those
+three hooks are not registered at all: **no skipped-hook line from this plugin,
+on any event**. Measured end to end: 0 skip lines, `prompt.submit x1`,
+`session.append x8`, canary absent from the transcript.
+
+The option stays off by default. On a machine with no policy mod it must stay
+off: there those three hooks are what deliver the opaque notice and scan engine
+attachments (`origin.kind === "hook"` context, which `session.append` never
+sees).
+
 `/redact why` shows what did arrive. Measured on a quiet session before 0.3.2:
 21 `session.append` runs reached the mod while 2–9 injected runs were bypassed;
 `prompt.submit` fired normally.
