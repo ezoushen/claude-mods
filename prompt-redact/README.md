@@ -200,25 +200,30 @@ without surfacing it to the user.
 ## Troubleshooting: "its session.append hook was skipped"
 
 On a machine with managed settings, `cc-plugin-sec-default` forwards some events
-past the user tier. The engine prints **one line per event and kind**, naming the
-event rather than the door, so `session.append` reads as fully skipped when only
-the engine-injected doors were.
+past the user tier and Claude Code prints one line per event and kind. That line
+names the event, not the door, so it reads as if the whole hook were dead.
 
-The usual trigger is `claude-mem`: its `SessionStart` hooks inject a memory block,
-which arrives as an `attachment`/`hook-context` row — exactly a door the guard
-forwards (claude-mem issue #1269 documents these as `saved_hook_context` entries).
-Claude Code's own `environment`, `model`, `skill_listing`, `date` and
-`prompt_snapshot` attachments land the same way, so the first bypass on a fresh
-session is expected, not a fault.
+**Cause: Claude Code's own injected rows, not another plugin.** Measured with
+claude-mem disabled entirely: the line still appeared, with 2 bypassed
+`session.append` runs. The engine emits `environment`, `model`, `skill_listing`,
+`date`, `instructions` and `session_context` attachments at startup, and every one
+takes the `attachment` door the guard forwards. claude-mem's `SessionStart`
+context adds more of the same (upstream issue #1269 calls them
+`saved_hook_context`).
 
-Check `/redact why`: if `session.append` shows any count, ordinary rows reached
-the hook and only injected rows did not. Measured on a clean session with the
-guard seated outermost: **7 bypassed runs against 21 `session.append` runs that
-reached the mod**, plus `prompt.submit x1`.
+**Since 0.3.2 this plugin no longer registers those doors.** `session.append` is
+matched only for the doors a user-tier mod can actually read — `prompt`,
+`command`, `response`, `tool-result`, `delivery`, `notice`, `queue` — so the
+engine has no skipped hook of this plugin's to report. The injected doors were
+never readable at this tier, so no carrier is lost. A deployment seated above the
+guard still reads them, and the injected-door code paths remain for that case.
 
-Nothing in this plugin can suppress that line — Claude Code writes it. Reducing
-it means reducing injected rows (claude-mem's context settings, for example), not
-disabling redaction.
+`/redact why` shows what did arrive. Measured on a quiet session before 0.3.2:
+21 `session.append` runs reached the mod while 2–9 injected runs were bypassed;
+`prompt.submit` fired normally.
+
+`prompt.context` (managed CLAUDE.md) and `skill.prompt` have no hook at all, at
+any tier, so those carriers remain uncovered regardless of seating.
 
 ## Known limitation
 
