@@ -215,14 +215,21 @@ context adds more of the same (upstream issue #1269 calls them
 matched only for the doors a user-tier mod can actually read — `prompt`,
 `command`, `response`, `tool-result`, `delivery`, `notice`, `queue` — so the
 engine has no skipped hook of this plugin's to report. The injected doors were
-never readable at this tier, so no carrier is lost. A deployment seated above the
-guard still reads them, and the injected-door code paths remain for that case.
+never readable at this tier, so no carrier is lost. The exclusion is
+unconditional — no registration names those doors, so a deployment seated above
+the guard would not receive them either.
 
 **Since 0.3.3, `guardedDeployment` removes the remaining three.** At this tier
 the guard also forwards `prompt.attachment`, `prompt.compose` and
 `prompt.section`, so registering them produced one line each at startup for
 hooks that could never run. Set `guardedDeployment: true` in the plugin's
-config (settings `pluginConfigs`, or the org's managed settings) and those
+config — `pluginConfigs` in user settings or, org-wide, in managed settings:
+
+```json
+{ "pluginConfigs": { "prompt-redact@claude-mods": { "options": { "guardedDeployment": true } } } }
+```
+
+With that in place those
 three hooks are not registered at all: **no skipped-hook line from this plugin,
 on any event**. Measured end to end: 0 skip lines, `prompt.submit x1`,
 `session.append x8`, canary absent from the transcript.

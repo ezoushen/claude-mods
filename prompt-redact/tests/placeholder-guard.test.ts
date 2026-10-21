@@ -217,14 +217,14 @@ describe("organization-tier hardening", () => {
   const orgNext = nextAt("prepend");
   const userNext = nextAt("user");
 
-  test("an injected row survives a failed scan instead of being deleted", async () => {
-    const { $, logs } = fakeEngine({ ...sessionState });
-    const message = { type: "system", content: [{ type: "text", text: "managed reminder text" }] };
-    const append = pick(failing, "session.append");
-    const out = (await append.handler($, { message, door: "compaction", origin: { kind: "engine" } }, (e: any) => e)) as any;
-    // Failing closed here would delete the summary the rest of the session runs on.
-    expect(out.message.content[0].text).toBe("managed reminder text");
-    expect(logs.join("\n")).toContain("stored unscanned");
+  test("no session.append registration accepts an engine-injected door", () => {
+    const doors = captured.filter((c) => c.event === "session.append").map((c) => c.match?.door);
+    // Excluded unconditionally: registering them only ever produced a skipped-hook
+    // notice for rows this mod cannot read.
+    for (const injected of ["attachment", "hook-context", "compaction", "note", "tool-message"]) {
+      expect(doors).not.toContain(injected);
+    }
+    expect(doors.length).toBeGreaterThan(0);
   });
 
   test("a person-authored row still fails closed", async () => {

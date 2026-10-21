@@ -42,13 +42,6 @@ import { RULES } from "./rules.ts";
 const WITHHELD =
   "[redact withheld this content: the redactor failed while scanning it]";
 
-/**
- * Rows the engine injects on the organization's behalf. The built-in guard keeps
- * them out of a person's mods' reach, which is why a deployment that seats this
- * mod in the organization's tier must not silently delete them.
- */
-const INJECTED_DOORS = new Set(["attachment", "hook-context", "compaction", "note"]);
-
 /** Fields a rewrite must not touch; the engine refuses them anyway. */
 const RESERVED = new Set(["tool", "tool_use_id", "agentId"]);
 
@@ -723,9 +716,9 @@ export function register(on: any, options: Record<string, unknown>): void {
   // compaction), skill rows and org notes past this tier, so registering them
   // would add a hook that is skipped on every session and print a skip notice per
   // event for rows this mod can never see. Narrowing the matcher keeps the
-  // transcript quiet and loses no carrier. The injected-door branches below stay
-  // as defence in depth for a deployment seated above the guard, where those
-  // doors do arrive.
+  // transcript quiet and loses no carrier. The exclusion is unconditional: a
+  // deployment seated above the guard would still not see these doors, because
+  // no registration names them.
   const VISIBLE_DOORS = ["prompt", "command", "response", "tool-result", "delivery", "notice", "queue"] as const;
   for (const door of VISIBLE_DOORS) {
     on("session.append", { door }, async ($: any, e: any, next: (e: any) => unknown) => {
@@ -741,30 +734,13 @@ export function register(on: any, options: Record<string, unknown>): void {
       await recordHits($, result.hits);
       return next({ ...e, message: result.message });
     } catch {
-      // Engine-injected rows belong to the organization, not the person. Dropping
-      // one silently deletes a managed reminder or a compaction summary the rest
-      // of the session runs on, so those fail open with a visible marker. Rows the
-      // person authored fail closed: a leak is not recoverable.
-      if (INJECTED_DOORS.has(String(e.door ?? ""))) {
-        try {
-          $.ui.log(`prompt-redact could not scan the ${String(e.door)} row; it was stored unscanned rather than dropped.`);
-        } catch {
-          // best-effort
-        }
-        return next(e);
-      }
+      // Only doors a person's content travels arrive here, so a failed scan is a
+      // leak risk, never managed content: fail closed.
       return next({ ...e, message: { ...e.message, content: [{ type: "text", text: WITHHELD }] } });
     }
   }).catch(async ($: any, e: any, next: any) => {
     // The engine's own failure paths (timeout, overrun, worker loss) land here.
-    if (INJECTED_DOORS.has(String(e?.door ?? ""))) {
-      try {
-        $.ui.log(`prompt-redact could not scan the ${String(e?.door)} row; it was stored unscanned rather than dropped.`);
-      } catch {
-        // best-effort
-      }
-      return next(e);
-    }
+    // Same rule: the doors reaching this mod carry person content, so fail closed.
     return next({ ...e, message: { ...(e?.message ?? {}), content: [{ type: "text", text: WITHHELD }] } });
     });
   }
