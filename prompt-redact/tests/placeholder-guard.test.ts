@@ -17,6 +17,9 @@ function captureHandlers(options: Record<string, unknown> = {}): Captured[] {
   const captured: Captured[] = [];
   const on = (event: string, a: any, b?: any) => {
     captured.push({ event, match: b ? a : undefined, handler: (b ?? a) as Captured["handler"] });
+    // The engine's `on` returns a registration carrying `.catch`; the mod now sets
+    // error handlers, so the stub has to honour that surface.
+    return { catch: (_handler: unknown) => undefined };
   };
   register(on, options);
   return captured;
@@ -196,5 +199,78 @@ describe("prompt annotation when the user's own message was redacted", () => {
       context?: string[];
     };
     expect(out.context ?? []).toEqual([]);
+  });
+});
+
+describe("organization-tier hardening", () => {
+  const captured = captureHandlers();
+  const failing = captureHandlers({ scanBudgetMs: -1 });
+  const pick = (list: Captured[], event: string) => list.find((c) => c.event === event)!;
+
+  const submit = pick(captured, "prompt.submit");
+  const attachment = pick(captured, "prompt.attachment");
+  const compose = pick(captured, "prompt.compose");
+  const section = pick(captured, "prompt.section");
+
+  /** A `next` whose hook frame sits in the organization's tier. */
+  const nextAt = (tier: string) => Object.assign((e: any) => e, { origin: { plugin: "prompt-redact", tier } });
+  const orgNext = nextAt("prepend");
+  const userNext = nextAt("user");
+
+  test("an injected row survives a failed scan instead of being deleted", async () => {
+    const { $, logs } = fakeEngine({ ...sessionState });
+    const message = { type: "system", content: [{ type: "text", text: "managed reminder text" }] };
+    const append = pick(failing, "session.append");
+    const out = (await append.handler($, { message, door: "compaction", origin: { kind: "engine" } }, (e: any) => e)) as any;
+    // Failing closed here would delete the summary the rest of the session runs on.
+    expect(out.message.content[0].text).toBe("managed reminder text");
+    expect(logs.join("\n")).toContain("stored unscanned");
+  });
+
+  test("a person-authored row still fails closed", async () => {
+    const { $ } = fakeEngine({ ...sessionState });
+    const message = { type: "user", content: [{ type: "text", text: `leak ${GHP_CANARY}` }] };
+    const append = pick(failing, "session.append");
+    const out = (await append.handler($, { message, door: "prompt", origin: { kind: "composer" } }, (e: any) => e)) as any;
+    expect(out.message.content[0].text).toContain("redact withheld this content");
+  });
+
+  test("session allow/deny lists never reach engine-injected carriers", async () => {
+    const denyState = { ...sessionState, "prompt-redact:deny": ["SECRETPAYLOAD"] };
+    const { $ } = fakeEngine(denyState);
+
+    const prompt = (await submit.handler($, { text: "token SECRETPAYLOAD" }, userNext)) as { text: string };
+    expect(prompt.text.includes("SECRETPAYLOAD")).toBe(false);
+
+    // The same span in an attachment is the organization's content; a user list
+    // must not be able to rewrite it.
+    const attached = (await attachment.handler($, { text: "token SECRETPAYLOAD" }, userNext)) as { text: string | null };
+    expect(attached.text).toBe("token SECRETPAYLOAD");
+  });
+
+  test("repository-supplied rules are ignored where the mod sits in the org's tier", async () => {
+    const files = { ".claude/prompt-redact.rules": "LOCALX LOCAL_[A-Z0-9]{8}\n" };
+    const text = "value LOCAL_AB12CD34";
+
+    const user = fakeEngine({ ...sessionState }, files);
+    const atUser = (await submit.handler(user.$, { text }, userNext)) as { text: string };
+    expect(atUser.text.includes("LOCAL_AB12CD34")).toBe(false);
+
+    const org = fakeEngine({ ...sessionState }, files);
+    const atOrg = (await submit.handler(org.$, { text }, orgNext)) as { text: string };
+    expect(atOrg.text).toBe(text);
+  });
+
+  test("the opaque notice lands once even when both notice hooks fire", async () => {
+    const { $ } = fakeEngine({ ...sessionState });
+    const sectionOut = (await section.handler($, { name: "env_info_simple", text: "ENV" }, (e: any) => ({ text: e.text }))) as {
+      text: string;
+    };
+    expect(sectionOut.text).toContain("opaque");
+
+    const composed = (await compose.handler($, {}, (_e: any) => ({ sections: [] }))) as {
+      sections?: { id: string }[];
+    };
+    expect((composed.sections ?? []).some((s) => s.id === "prompt-redact:notice")).toBe(false);
   });
 });

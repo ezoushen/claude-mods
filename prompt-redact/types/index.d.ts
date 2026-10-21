@@ -19,6 +19,8 @@ declare module "claude-code" {
       deny: string[];
       /** Rule ids switched off for this session; a disabled rule never fires. */
       disabled: string[];
+      /** Whether the opaque-placeholder notice already landed on this prompt. */
+      noticeShown: boolean;
       /**
        * How many runs of each interception hook reached this code this session,
        * by event name. Runs the engine or an outer plugin skipped are absent:

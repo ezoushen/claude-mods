@@ -150,7 +150,10 @@ right, but a hook has to be given the carrier.
 | --- | --- | --- |
 | typed prompt | `prompt.submit` | always |
 | tool result (Read/Bash/Grep/MCP) | `tool.call` | always |
-| reply block, subagent row, compaction summary | `session.append` | where the platform lets a user plugin hook it |
+| reply block, subagent row | `session.append` | reached at user tier; the guard does not skip these doors |
+| compaction summary, injected rows (attachment, hook-context, skill body, org note) | `session.append` | **not reached at user tier** — the guard forwards these doors past the user tier |
+| managed CLAUDE.md / instruction context | none (`prompt.context` unhooked) | **not covered at any tier** |
+| skill body as text | none (`skill.prompt` unhooked) | **not covered at any tier** |
 | `@`-mentioned file content (attachment blob) | `prompt.attachment` | **not covered on this deployment — measured leak** (organization account, outer policy plugin seats first) |
 | injected attachment (a settings hook's context) | `prompt.attachment` | where the platform lets a user plugin hook it |
 | system-prompt notice | `prompt.compose`, `prompt.section` | where the platform lets a user plugin hook it |

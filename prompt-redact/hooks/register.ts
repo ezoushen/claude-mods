@@ -42,6 +42,13 @@ import { RULES } from "./rules.ts";
 const WITHHELD =
   "[redact withheld this content: the redactor failed while scanning it]";
 
+/**
+ * Rows the engine injects on the organization's behalf. The built-in guard keeps
+ * them out of a person's mods' reach, which is why a deployment that seats this
+ * mod in the organization's tier must not silently delete them.
+ */
+const INJECTED_DOORS = new Set(["attachment", "hook-context", "compaction", "note"]);
+
 /** Fields a rewrite must not touch; the engine refuses them anyway. */
 const RESERVED = new Set(["tool", "tool_use_id", "agentId"]);
 
@@ -89,8 +96,8 @@ const TIERS: readonly Tier[] = ["strict", "balanced", "precision"];
  * `prompt.submit` and `tool.call` carry the typed prompt and the tool results on
  * every deployment. The other four are the prompt-content hooks a managed
  * account's builtin policy plugin can keep from ever reaching this mod: the
- * platform seats such a plugin outermost, and one run it answers itself means
- * this mod never sees that run. Whether that happened is written only by the
+ * platform seats such a plugin outermost, and a run it forwards past the user
+ * tier (`next.to(e, "append")`) means this mod never sees that run. Whether that happened is written only by the
  * platform, outside this process (its skip notice reaches the transcript or the
  * debug log and no hook), so the report below can state exactly one thing:
  * how many runs of each hook arrived. It can never state that a carrier was
@@ -281,6 +288,28 @@ async function setFires($: any, value: Record<string, number>): Promise<void> {
 }
 
 /**
+ * Whether this prompt already carries the opaque-placeholder notice. Two hooks
+ * deliver it (`prompt.section` and `prompt.compose`), and both fire on a surface
+ * where neither is pre-empted, so the first one to land sets this and the second
+ * stands down.
+ */
+async function getNoticeShown($: any): Promise<boolean> {
+  try {
+    const got = await $.state.get({ plugin: "prompt-redact", key: "noticeShown" });
+    return got?.value === true;
+  } catch {
+    return false;
+  }
+}
+async function setNoticeShown($: any, value: boolean): Promise<void> {
+  try {
+    await $.state.set({ plugin: "prompt-redact", key: "noticeShown" }, value);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
  * How many runs of each interception hook reached this code. This is the only
  * in-process evidence there is: an engine-skipped run never enters a hook, and
  * the platform's skip notice is written outside this process, where no hook
@@ -319,6 +348,31 @@ function compile(source: string): RegExp | null {
   }
 }
 
+/**
+ * Which sources may steer detection on this run.
+ *
+ * `repo` covers the project-local rules file and the optional classifier: both
+ * are read from the session's own directory, so a cloned repository controls
+ * them. That is the point where this mod sits in the person's own tier. It is
+ * not acceptable where the mod is the organization's, because a repository would
+ * then gain a say over what the organization put in front of the model.
+ */
+type Sourcing = {
+  readonly repo: boolean;
+  /** Session allow/deny lists: the person's steering, applied to user content only. */
+  readonly sessionLists: boolean;
+};
+
+/** Tiers where this mod counts as the organization's, not the person's. */
+function isOrgSeated(next: unknown): boolean {
+  const tier = (next as { origin?: { tier?: unknown } } | undefined)?.origin?.tier;
+  return tier === "prepend" || tier === "append";
+}
+
+function sourcingFor(next: unknown, sessionLists: boolean): Sourcing {
+  return { repo: !isOrgSeated(next), sessionLists };
+}
+
 async function optionsFor(
   $: any,
   salt: string,
@@ -326,16 +380,18 @@ async function optionsFor(
   minEntropy: number,
   budgetMs: number,
   disabledRules: readonly string[],
+  sourcing: Sourcing,
 ): Promise<ScrubOptions> {
   return {
     salt,
     tier,
     minEntropy,
-    extraRules: await localRules($),
-    allowExtra: (await getAllow($)).map(compile).filter((r): r is RegExp => r !== null),
-    deny: (await getDeny($)).map(compile).filter((r): r is RegExp => r !== null),
+    // Repository-supplied detection only where this mod sits in the person's tier.
+    extraRules: sourcing.repo ? await localRules($) : [],
+    allowExtra: sourcing.sessionLists ? (await getAllow($)).map(compile).filter((r): r is RegExp => r !== null) : [],
+    deny: sourcing.sessionLists ? (await getDeny($)).map(compile).filter((r): r is RegExp => r !== null) : [],
     budgetMs,
-    classifier: await localClassifier($),
+    classifier: sourcing.repo ? await localClassifier($) : null,
     disabledRules: (await getDisabled($)) ?? disabledRules,
   };
 }
@@ -512,10 +568,15 @@ async function initialized($: any, cfg: Cfg): Promise<void> {
   if ((await getDisabled($)) === undefined) await setDisabled($, [...cfg.disabledRules]);
 }
 
-async function scrubText($: any, text: string, cfg: Cfg): Promise<{ enabled: boolean; text: string; hits: readonly ScrubHit[] }> {
+async function scrubText(
+  $: any,
+  text: string,
+  cfg: Cfg,
+  sourcing: Sourcing,
+): Promise<{ enabled: boolean; text: string; hits: readonly ScrubHit[] }> {
   const { enabled, tier, salt } = await posture($, cfg);
   if (!enabled || !salt) return { enabled: false, text, hits: [] as const };
-  const result = scrub(text, await optionsFor($, salt, tier, cfg.minEntropy, cfg.budgetMs, cfg.disabledRules));
+  const result = scrub(text, await optionsFor($, salt, tier, cfg.minEntropy, cfg.budgetMs, cfg.disabledRules, sourcing));
   return { enabled: true, text: result.text, hits: result.hits };
 }
 
@@ -602,7 +663,7 @@ export function register(on: any, options: Record<string, unknown>): void {
   on("prompt.submit", async ($: any, e: any, next: (e: any) => unknown) => {
     await markObserved($, "prompt.submit");
     try {
-      const result = await scrubText($, String(e.text ?? ""), cfg);
+      const result = await scrubText($, String(e.text ?? ""), cfg, sourcingFor(next, true));
       if (!result.enabled || result.hits.length === 0) return next(e);
       await recordHits($, result.hits);
       const labels = result.hits.map((hit) => hit.label).join(", ");
@@ -636,7 +697,11 @@ export function register(on: any, options: Record<string, unknown>): void {
       }
       return { drop: "prompt-redact withheld this prompt: the redactor failed while scanning it" };
     }
-  });
+  }).catch((_$: any, _e: any, _next: any) => ({
+    // Engine-level failure (timeout, misreturn, worker loss) is still a leak
+    // risk: fail closed the way the in-code path does.
+    drop: "prompt-redact withheld this prompt: the redactor failed or overran its budget",
+  }));
 
   // --- session.append: every stored row -------------------------------------
   // Doors: prompt, command, response, tool-result, tool-message, delivery,
@@ -648,15 +713,39 @@ export function register(on: any, options: Record<string, unknown>): void {
     try {
       const { enabled, tier, salt } = await posture($, cfg);
       if (!enabled || !salt) return next(e);
-      const result = scrubMessage(e.message, await optionsFor($, salt, tier, cfg.minEntropy, cfg.budgetMs, cfg.disabledRules));
+      const result = scrubMessage(
+        e.message,
+        await optionsFor($, salt, tier, cfg.minEntropy, cfg.budgetMs, cfg.disabledRules, sourcingFor(next, String(e.door ?? "") === "prompt")),
+      );
       if (result.hits.length === 0) return next(e);
       await recordHits($, result.hits);
       return next({ ...e, message: result.message });
     } catch {
-      // Fail closed on the row while keeping its shape: the model and the
-      // transcript must never read this content raw.
+      // Engine-injected rows belong to the organization, not the person. Dropping
+      // one silently deletes a managed reminder or a compaction summary the rest
+      // of the session runs on, so those fail open with a visible marker. Rows the
+      // person authored fail closed: a leak is not recoverable.
+      if (INJECTED_DOORS.has(String(e.door ?? ""))) {
+        try {
+          $.ui.log(`prompt-redact could not scan the ${String(e.door)} row; it was stored unscanned rather than dropped.`);
+        } catch {
+          // best-effort
+        }
+        return next(e);
+      }
       return next({ ...e, message: { ...e.message, content: [{ type: "text", text: WITHHELD }] } });
     }
+  }).catch(async ($: any, e: any, next: any) => {
+    // The engine's own failure paths (timeout, overrun, worker loss) land here.
+    if (INJECTED_DOORS.has(String(e?.door ?? ""))) {
+      try {
+        $.ui.log(`prompt-redact could not scan the ${String(e?.door)} row; it was stored unscanned rather than dropped.`);
+      } catch {
+        // best-effort
+      }
+      return next(e);
+    }
+    return next({ ...e, message: { ...(e?.message ?? {}), content: [{ type: "text", text: WITHHELD }] } });
   });
 
   // --- prompt.attachment: every message the engine injects on its own ------
@@ -679,24 +768,39 @@ export function register(on: any, options: Record<string, unknown>): void {
         return got ?? { text: typeof text === "string" ? text : null };
       }
       if (text === "") return { text };
-      const result = scrub(text, await optionsFor($, salt, tier, cfg.minEntropy, cfg.budgetMs, cfg.disabledRules));
+      const result = scrub(text, await optionsFor($, salt, tier, cfg.minEntropy, cfg.budgetMs, cfg.disabledRules, sourcingFor(next, false)));
       if (result.hits.length === 0) return { text };
       await recordHits($, result.hits);
       return { text: result.text };
     } catch {
       // Fail closed: leaving one attachment out is recoverable; carrying it raw
-      // into the request is not.
+      // into the request is not. Say so, rather than dropping it quietly.
+      try {
+        $.ui.log("prompt-redact could not scan an attachment; it was withheld rather than carried raw.");
+      } catch {
+        // best-effort
+      }
       return { text: null };
     }
+  }).catch(async ($: any, _e: any, _next: any) => {
+    try {
+      $.ui.log("prompt-redact could not scan an attachment; it was withheld rather than carried raw.");
+    } catch {
+      // best-effort
+    }
+    return { text: null };
   });
 
   // --- prompt.compose: the standing notice, on the system-prompt surface -----
   // `prompt.section` was skipped in a live session because another plugin's hook
   // ran first and passed the event on without calling `next`. `prompt.compose`
   // is the composition of the whole system prompt, so appending a `session`
-  // section here delivers the notice even when the per-section chain is not
-  // reached. Both are registered: whichever one the engine reaches, the model
-  // is told the placeholders are opaque.
+  // section here delivers the notice when the per-section chain is reachable.
+  // Both are registered because the two can be pre-empted independently: on an
+  // organization account the guard forwards each past the user tier, and a
+  // `prompt.section` run that lands while `prompt.compose` is skipped still
+  // delivers it. Whichever lands first sets the state flag, so the notice is not
+  // duplicated when both fire.
   on("prompt.compose", async ($: any, e: any, next: (e: any) => unknown) => {
     await markObserved($, "prompt.compose");
     const got = (await next(e)) as
@@ -706,6 +810,10 @@ export function register(on: any, options: Record<string, unknown>): void {
     const { enabled } = await posture($, cfg);
     if (!enabled) return got;
     if (got.sections.some((section) => section.id === NOTICE_SECTION_ID)) return got;
+    // One notice per prompt: `prompt.section` and `prompt.compose` both deliver
+    // it when both fire, so the second one stands down.
+    if (await getNoticeShown($)) return got;
+    await setNoticeShown($, true);
     return {
       sections: [...got.sections, { id: NOTICE_SECTION_ID, text: OPAQUE_NOTICE.trim(), scope: "session" as const }],
     };
@@ -722,6 +830,8 @@ export function register(on: any, options: Record<string, unknown>): void {
     const got = (await next(e)) as { text: string | null } | undefined;
     const text = got?.text ?? e.text;
     if (typeof text !== "string") return got ?? { text: null };
+    if (await getNoticeShown($)) return { text };
+    await setNoticeShown($, true);
     return { text: text + OPAQUE_NOTICE };
   });
 
@@ -929,7 +1039,7 @@ export function register(on: any, options: Record<string, unknown>): void {
       return answer;
     }
     try {
-      const opts = await optionsFor($, salt, tier, cfg.minEntropy, cfg.budgetMs, cfg.disabledRules);
+      const opts = await optionsFor($, salt, tier, cfg.minEntropy, cfg.budgetMs, cfg.disabledRules, sourcingFor(next, true));
       const hits: ScrubHit[] = [];
       // A tool's result is JSON-shaped; `asRehydratable` is the boundary parse,
       // so the walk below is typed end to end instead of threading `unknown`.
@@ -963,7 +1073,10 @@ export function register(on: any, options: Record<string, unknown>): void {
       // or the transcript. An error result is recoverable; a leak is not.
       return { deny: "prompt-redact could not scan this tool result; it was withheld rather than returned raw" };
     }
-  });
+  }).catch(() => ({
+    // Engine-level failure: the tool ran, but its output must not reach the model raw.
+    deny: "prompt-redact could not scan this tool result; it was withheld rather than returned raw",
+  }));
 
   // --- ui.render: the transparent band above the prompt ---------------------
   // Draws only when there is something to say. Elements come from the surface's

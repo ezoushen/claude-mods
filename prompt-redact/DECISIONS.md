@@ -237,14 +237,20 @@ and a scan failure returns `{ text: null }` — dropping the attachment rather t
 carrying it raw.
 
 **Deployment caveat, measured.** On an organization account the builtin
-`cc-plugin-sec-default` seats outermost; the engine logged that this mod's
-`prompt.attachment`, `prompt.compose`, `prompt.section` and `session.append` hooks
-were each skipped ("runs first and sent the event on past it"). That plugin's own
+`cc-plugin-sec-default` seats outermost. It does not answer these events itself:
+it calls `next.to(e, "append")`, which forwards past the user tier, and the engine
+logs that this mod's hook was skipped ("runs first and sent the event on past it").
+That covers `prompt.attachment`, `prompt.compose` and `prompt.section`, and on
+`session.append` only the doors the engine injects itself: `attachment`,
+`hook-context`, `compaction`, skill `tool-message`, and an organization plugin's
+own notes. Prompt, reply and tool-result rows are reached at user tier, so the
+echo-back carrier is covered; the injected ones are not. The plugin's own
 description says it keeps organization prompt content "out of reach of the plugins
-a person installs" — a policy boundary, not a bug in this mod. The typed prompt and
-tool results stay covered because `prompt.submit` and `tool.call` do run. An
-administrator who wants the rest covered lists this plugin under managed
-`prependPlugins`.
+a person installs" — a policy boundary, not a bug in this mod. An administrator who
+wants those carriers covered seats this plugin ahead of the guard: a directory
+source, managed `enabledPlugins`, and `prependPlugins` naming this plugin before
+`sec-default@builtin` (a cache copy from GitHub counts as the person's and is
+skipped).
 
 **Measured limit (ticket 05, organization account).** Registration does not help
 where the event never arrives. An `@`-mentioned file holding two synthetic
@@ -384,5 +390,41 @@ not the obvious one — local rules or the optional classifier — and `/redact`
 (including `/redact why`, which lists which interception hooks actually arrived)
 stays the on-demand check.
 
-The platform's "hook was skipped" notice is not ours to suppress: it is written
-by Claude Code when an outer plugin answers an event without calling `next`.
+The platform's "hook was skipped" notice is not ours to suppress: Claude Code
+writes it when an outer plugin forwards an event past a lower tier
+(`next.to(e, "append")`) without calling `next` for this mod.
+
+---
+
+## Organization-tier hardening (0.3.0)
+
+**Decision:** make the mod safe to seat in the organization's tier before anyone
+does it.
+
+Prepending the mod ahead of the built-in guard closes the measured `@`-mention
+gap and reaches compaction, injected-context and skill rows. Without changes it
+also hands user and repository input a say over what the organization put in
+front of the model, which is the boundary the guard exists to hold. Five changes
+close that:
+
+1. **Detection sourcing is tier-aware.** `next.origin.tier` decides whether the
+   project-local rules file and the optional classifier are read at all. Where
+   the mod sits in `prepend`/`append`, a cloned repository cannot add or
+   re-weight detection.
+2. **Session allow/deny lists reach user content only.** `/redact deny <regex>`
+   applies to `prompt.submit` and the `session.append` `prompt` door, never to
+   `prompt.attachment` or the engine-injected doors.
+3. **Engine-injected rows fail open, visibly.** A failed scan on an injected door
+   passes the row through and logs it, instead of replacing the row with
+   `WITHHELD` and deleting a managed reminder or compaction summary. Person-authored
+   rows still fail closed.
+4. **`.catch` handlers on the interception hooks.** Engine-level failures
+   (timeout, overrun, worker loss) now fail closed where a leak is possible and
+   pass through visibly where deletion would be worse, rather than silently
+   skipping the hook.
+5. **One notice per prompt.** `prompt.section` and `prompt.compose` both deliver
+   the opaque notice; a session-state flag lets the second stand down.
+
+**Still true and unchanged:** rehydration stays scoped to `Edit`/`Write`/
+`NotebookEdit`, `Bash`/`WebFetch`/`WebSearch` are refused when they carry a
+placeholder, and the vault stays in session state.
