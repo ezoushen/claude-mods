@@ -197,6 +197,29 @@ cannot dictate the model's words. What *can* be forced is the refusal, and a
 refusal with the instruction attached leaves the model no way to continue
 without surfacing it to the user.
 
+## Troubleshooting: "its session.append hook was skipped"
+
+On a machine with managed settings, `cc-plugin-sec-default` forwards some events
+past the user tier. The engine prints **one line per event and kind**, naming the
+event rather than the door, so `session.append` reads as fully skipped when only
+the engine-injected doors were.
+
+The usual trigger is `claude-mem`: its `SessionStart` hooks inject a memory block,
+which arrives as an `attachment`/`hook-context` row — exactly a door the guard
+forwards (claude-mem issue #1269 documents these as `saved_hook_context` entries).
+Claude Code's own `environment`, `model`, `skill_listing`, `date` and
+`prompt_snapshot` attachments land the same way, so the first bypass on a fresh
+session is expected, not a fault.
+
+Check `/redact why`: if `session.append` shows any count, ordinary rows reached
+the hook and only injected rows did not. Measured on a clean session with the
+guard seated outermost: **7 bypassed runs against 21 `session.append` runs that
+reached the mod**, plus `prompt.submit x1`.
+
+Nothing in this plugin can suppress that line — Claude Code writes it. Reducing
+it means reducing injected rows (claude-mem's context settings, for example), not
+disabling redaction.
+
 ## Known limitation
 
 Measured on a live Haiku session with `tools/verify-transcript.mjs`, plugin
