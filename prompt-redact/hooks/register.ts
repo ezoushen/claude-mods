@@ -703,12 +703,23 @@ export function register(on: any, options: Record<string, unknown>): void {
     drop: "prompt-redact withheld this prompt: the redactor failed or overran its budget",
   }));
 
-  // --- session.append: every stored row -------------------------------------
+  // --- session.append: every stored row this tier can see --------------------
   // Doors: prompt, command, response, tool-result, tool-message, delivery,
-  // attachment, hook-context, note, compaction, notice. This is the one event
-  // that sees a row before BOTH the model and the transcript file, so it closes
-  // the echo-back leak where the model restates a secret in its reply.
-  on("session.append", async ($: any, e: any, next: (e: any) => unknown) => {
+  // attachment, hook-context, note, compaction, notice, queue. This is the one
+  // event that sees a row before BOTH the model and the transcript file, so it
+  // closes the echo-back leak where the model restates a secret in its reply.
+  //
+  // Only doors a user-tier mod can actually read are matched. On an organization
+  // account the guard forwards the injected doors (attachment, hook-context,
+  // compaction), skill rows and org notes past this tier, so registering them
+  // would add a hook that is skipped on every session and print a skip notice per
+  // event for rows this mod can never see. Narrowing the matcher keeps the
+  // transcript quiet and loses no carrier. The injected-door branches below stay
+  // as defence in depth for a deployment seated above the guard, where those
+  // doors do arrive.
+  const VISIBLE_DOORS = ["prompt", "command", "response", "tool-result", "delivery", "notice", "queue"] as const;
+  for (const door of VISIBLE_DOORS) {
+    on("session.append", { door }, async ($: any, e: any, next: (e: any) => unknown) => {
     await markObserved($, "session.append");
     try {
       const { enabled, tier, salt } = await posture($, cfg);
@@ -746,7 +757,8 @@ export function register(on: any, options: Record<string, unknown>): void {
       return next(e);
     }
     return next({ ...e, message: { ...(e?.message ?? {}), content: [{ type: "text", text: WITHHELD }] } });
-  });
+    });
+  }
 
   // --- prompt.attachment: every message the engine injects on its own ------
   // This is the event that sees an injected message as a request is about to
