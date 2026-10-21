@@ -21,15 +21,18 @@ Or try it for one session without installing: `claude --plugin-dir ./prompt-reda
 - **Tool output** — file reads, shell output and MCP results are rewritten before
   the model reads them. A `cat` of a file holding a key hands the model a
   placeholder.
-- **Reply rows, stored attachment rows and compaction summaries** — `session.append`
-  rewrites every stored row before both the model and the transcript see it,
-  which closes the echo-back leak where the model restates a secret. **Caveat:** an
-  organization account seats the builtin `cc-plugin-sec-default` outermost and
-  that plugin deliberately keeps prompt content out of reach of user-installed
-  plugins, so the engine skips these hooks. In that deployment the guarantees
-  below rest on `prompt.submit` and `tool.call` alone, which do run. An
-  `@`-mentioned file is not a stored row; it is the next carrier, and on that
-  deployment it is not covered.
+- **Reply rows and stored rows** — `session.append` rewrites a stored row before
+  both the model and the transcript see it, which closes the echo-back leak where
+  the model restates a secret. **Caveat:** an organization account seats the
+  builtin `cc-plugin-sec-default` outermost. That guard forwards *past* the user
+  tier (`next.to(e, "append")`) for the rows the engine injects itself — the
+  `attachment`, `hook-context`, `compaction` and skill `tool-message` doors, plus
+  an organization plugin's own notes — so those four are not reached at user
+  tier. Ordinary prompt, reply and tool-result rows are reached: the guard does
+  not skip those doors. Two carriers have no hook at all, at any tier:
+  `prompt.context` (where managed CLAUDE.md most likely travels) and
+  `skill.prompt`. An `@`-mentioned file is not a stored row; it travels on the
+  next carrier.
 - **Injected context** — `prompt.attachment` scrubs text another settings hook
   injects into the request (SessionStart/UserPromptSubmit additional context),
   which `session.append` never sees because it is not a stored row. A file
@@ -215,11 +218,23 @@ real key because rehydration fired.
 Two things that number does **not** claim:
 
 1. **Hook reach depends on deployment.** On an organization account the builtin
-   `cc-plugin-sec-default` seats outermost and the engine skips this mod's
-   `session.append`, `prompt.section`, `prompt.compose` and `prompt.attachment`
-   hooks ("runs first and sent the event on past it"). The typed prompt and tool
-   results are still covered by `prompt.submit` and `tool.call`. For the rest, an
-   administrator has to list the plugin under managed `prependPlugins`.
+   `cc-plugin-sec-default` seats outermost and forwards past the user tier on
+   this mod's `prompt.section`, `prompt.compose`, `prompt.attachment` hooks and
+   on the engine-injected `session.append` doors ("runs first and sent the event
+   on past it"). Prompt, reply and tool-result rows still reach `session.append`;
+   typed prompts and tool results stay covered by `prompt.submit` and
+   `tool.call`.
+
+   Registering this plugin org-wide from a GitHub marketplace (for example
+   `extraKnownMarketplaces` + `enabledPlugins` in managed settings) makes it
+   available to every member, but it does **not** change the seating: a plugin
+   Claude Code copies into its cache counts as the person's, even when managed
+   settings enable it. To seat it ahead of the guard, an administrator needs all
+   of: a marketplace declared with a **directory** source on each machine,
+   managed `enabledPlugins`, and `prependPlugins` listing this plugin **before**
+   `sec-default@builtin` (the list replaces the default seating, so the guard
+   must be named). The remote payload also needs `managedSourcesBehavior:
+   "merge"`, or a local `managed-settings.json` is ignored under first-wins.
 
    For the attachment carrier this is not a theoretical caveat. Measured on this
    account (organization OAuth, live Haiku session, policy plugin outermost): a

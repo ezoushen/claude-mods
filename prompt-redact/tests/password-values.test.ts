@@ -74,6 +74,7 @@ function captureHandlers(): Captured[] {
   const captured: Captured[] = [];
   const on = (event: string, a: any, b?: any) => {
     captured.push({ event, match: b ? a : undefined, handler: (b ?? a) as Captured["handler"] });
+    return { catch: (_handler: unknown) => undefined };
   };
   register(on, {});
   return captured;

@@ -17,6 +17,9 @@ function captureHandlers(options: Record<string, unknown> = {}): Captured[] {
   const captured: Captured[] = [];
   const on = (event: string, a: any, b?: any) => {
     captured.push({ event, match: b ? a : undefined, handler: (b ?? a) as Captured["handler"] });
+    // The engine's `on` returns a registration carrying `.catch`; the mod now sets
+    // error handlers, so the stub has to honour that surface.
+    return { catch: (_handler: unknown) => undefined };
   };
   register(on, options);
   return captured;
