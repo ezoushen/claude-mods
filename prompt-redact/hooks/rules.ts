@@ -53,7 +53,30 @@ const PASSWORD_VALUE_DESCRIPTOR: Rule = {
  * detectors that are not part of it. `scrub.ts` excludes the latter from the
  * corpus scan and runs each in its own pass.
  */
-export const RULES: readonly Rule[] = [...GENERATED_RULES, PASSWORD_VALUE_DESCRIPTOR];
+/**
+ * The id a person writes after `/redact rule off` to silence the secret-named
+ * assignment detector (`NAME=value` where the name's last word is a secret
+ * word). Engine-owned like the password detector, and listed here for the same
+ * reason: L3 validates against this surface.
+ */
+export const SECRET_ASSIGNMENT_RULE_ID = "secret-assignment";
+
+const SECRET_ASSIGNMENT_DESCRIPTOR: Rule = {
+  id: SECRET_ASSIGNMENT_RULE_ID,
+  label: "SECRET_ASSIGNMENT",
+  // Never compiled into the corpus scan (scrub.ts filters ENGINE_RULE_IDS).
+  regex: "(?!)",
+  flags: "",
+  groups: 0,
+  secretGroup: null,
+  entropy: null,
+  keywords: [],
+  allow: [],
+  kind: "generic",
+  source: "https://github.com/ezoushen/claude-mods/blob/main/prompt-redact/hooks/scrub.ts#secret-assignment",
+};
+
+export const RULES: readonly Rule[] = [...GENERATED_RULES, PASSWORD_VALUE_DESCRIPTOR, SECRET_ASSIGNMENT_DESCRIPTOR];
 
 /** Rules grouped by the family that makes them cheap to run. */
 export function rulesByKind(): { prefix: Rule[]; vendorKeyword: Rule[]; generic: Rule[] } {

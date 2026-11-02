@@ -19,6 +19,11 @@ export type AllowEntry = {
   /** Why this shape is benign; quoted in `RULES.md` and `/redact why`. */
   readonly why: string;
   readonly pattern: RegExp;
+  /**
+   * A content hash: benign on its own, but a credential when it is the value of a
+   * secret-named assignment (`API_TOKEN=<32 hex>`), where it is the secret itself.
+   */
+  readonly contentHash?: true;
 };
 
 const A = (why: string, source: string, flags = ""): AllowEntry => ({
@@ -26,13 +31,15 @@ const A = (why: string, source: string, flags = ""): AllowEntry => ({
   pattern: new RegExp(`^(?:${source})$`, flags),
 });
 
+const H = (why: string, source: string, flags = ""): AllowEntry => ({ ...A(why, source, flags), contentHash: true });
+
 export const ALLOWLIST: readonly AllowEntry[] = [
   // --- content hashes: the classic high-entropy non-secret -------------------
-  A("git commit SHA-1 (content address, not a credential)", "[0-9a-f]{40}", "i"),
-  A("git blob/tree SHA-1 with prefix", "(?:blob|tree|commit)\\s[0-9a-f]{40}", "i"),
-  A("SHA-256 digest (content address, not a credential)", "[0-9a-f]{64}", "i"),
-  A("`sha256:` image digest", "sha256:[0-9a-f]{64}", "i"),
-  A("MD5 / 32-hex checksum", "[0-9a-f]{32}", "i"),
+  H("git commit SHA-1 (content address, not a credential)", "[0-9a-f]{40}", "i"),
+  H("git blob/tree SHA-1 with prefix", "(?:blob|tree|commit)\\s[0-9a-f]{40}", "i"),
+  H("SHA-256 digest (content address, not a credential)", "[0-9a-f]{64}", "i"),
+  H("`sha256:` image digest", "sha256:[0-9a-f]{64}", "i"),
+  H("MD5 / 32-hex checksum", "[0-9a-f]{32}", "i"),
 
   // --- identifiers: needed to reference objects in code ---------------------
   A("UUID / database id / k8s resource UID", "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "i"),
@@ -69,10 +76,16 @@ export const ALLOWLIST: readonly AllowEntry[] = [
 ];
 
 /** True when `value` is a benign shape that must reach the model unchanged. */
-export function isAllowed(value: string, extra: readonly RegExp[] = []): string | null {
+export function isAllowed(
+  value: string,
+  extra: readonly RegExp[] = [],
+  context: { readonly secretNamed?: boolean } = {},
+): string | null {
   const v = value.trim();
   if (!v) return "empty";
   for (const entry of ALLOWLIST) {
+    // A content hash assigned to a secret-named variable is the credential itself.
+    if (entry.contentHash && context.secretNamed) continue;
     if (entry.pattern.test(v)) return entry.why;
   }
   for (const re of extra) {

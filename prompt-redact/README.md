@@ -59,6 +59,12 @@ Five layers, auto-selected per machine and per row:
    `tools/check-rules.mjs`.
 3. **Generic** — the corrected `keyword = value` shape, with a tolerant prefix, a
    quote tolerated before the separator, and a low length floor.
+   A name ending in a secret word (`API_TOKEN`, `apiKey`) also makes the value a
+   credential whatever its shape, so a 32-hex run under `FOO_TOKEN=` is redacted,
+   not excused as a checksum. At the default tier a line-shaped `NAME=value` (an `env`/`.env` line,
+   not a keyword argument in code) with such a name is redacted from six
+   characters up, with no entropy gate
+   (`secret-assignment`; `/redact rule off secret-assignment`).
 4. **Context score** — for the generic family only, weighted by nearby
    deployment vocabulary and by value shape.
 5. **Local rules** — an optional `.claude/prompt-redact.rules` (one

@@ -1,6 +1,6 @@
 ---
 name: redacted-values
-description: Work correctly when a credential appears as a [REDACTED:<LABEL>#<hash>] placeholder. Use when a prompt, tool result, file, or your own reply contains a prompt-redact placeholder, when a Bash/WebFetch call was refused for carrying one, or when the user asks about a hidden credential value.
+description: Work correctly when a credential appears as a [REDACTED:LABEL#hash] placeholder. Use when a prompt, tool result, file, or your own reply contains a prompt-redact placeholder, when a Bash/WebFetch call was refused for carrying one, or when the user asks about a hidden credential value.
 ---
 
 # Working with redacted values

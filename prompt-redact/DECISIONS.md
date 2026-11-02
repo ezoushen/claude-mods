@@ -428,3 +428,37 @@ close that:
 **Still true and unchanged:** rehydration stays scoped to `Edit`/`Write`/
 `NotebookEdit`, `Bash`/`WebFetch`/`WebSearch` are refused when they carry a
 placeholder, and the vault stays in session state.
+
+## Secret-named assignments (shell-environment dump leak)
+
+**Decision:** a value assigned to a secret-named variable is a credential
+whatever its shape or length, and the allowlist's content-hash entries no longer
+excuse it.
+
+**Evidence:** a shell-environment dump read through `Read` reached the model
+with a 32-hex `*_TOKEN` and a 9-character `*_API_KEY` raw. The first was
+allowlisted as an MD5-shaped checksum; the second sat under the generic rule's
+10-character floor and 3.5-bit entropy gate. Both are credentials by name alone.
+
+**Shape:** "secret-named" means the *last word* of the name (split on `_ . -` and
+camelCase) is `token|key|secret|password|passwd|auth|credential(s)|apikey`, so
+`KEYBOARD_HACK`, `TOKEN_COUNT` and `SSH_AUTH_SOCK` stay raw. Two changes:
+
+1. The generic family passes `secretNamed` to the allowlist, which then skips its
+   content-hash entries (SHA-1, SHA-256, MD5, `sha256:` digests). A bare checksum,
+   or one under a name that only contains a secret word (`author_sha`), is still
+   allowlisted.
+2. `secret-assignment`, an engine detector in the `password-value` mould: a
+   line-shaped `NAME=value` (the name starts the line, follows Read's `NN<tab>`
+   prefix or the escaped `\n`/`\t` of a JSON-string dump; `=` only, so
+   `key: string` and `OpenAI(api_key=api_key)` are not assignments), value six
+   characters or more, no entropy gate, default tier only. It runs after the corpus,
+   so a vendor rule keeps its label on a span both find. Paths, templates and the
+   placeholder lexicon still pass. Names ending `secret`/`password`/`passwd` are
+   left to `password-value`, so switching it off stays a complete off switch.
+
+**Not done:** query-string and `--flag=value` forms (the generic rule still covers
+those when the value is high-entropy); the zsh `'a'\''b'` and `$'...'` quoting
+forms (also missed before); values over 4096 characters. UUID, ULID and ObjectId values under a secret-named assignment are
+still allowlisted as identifiers; they are credential-shaped too (Heroku keys are
+UUIDs) and are a follow-up if wanted.

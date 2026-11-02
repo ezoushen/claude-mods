@@ -25,6 +25,7 @@ import {
   GLOBAL_STOPWORDS,
   PASSWORD_VALUE_RULE_ID,
   RULES,
+  SECRET_ASSIGNMENT_RULE_ID,
   type Rule,
 } from "./rules.ts";
 import { isAllowed } from "./allowlist.ts";
@@ -130,8 +131,59 @@ const GLOBAL_ALLOW = GLOBAL_ALLOW_REGEXES.map((s) => {
 const PASSWORD_VALUE_RE =
   /(?:^|[^A-Za-z0-9])(?:[A-Za-z0-9]{1,30}[_.-]){0,6}(?:password|passwd|pwd|pass|secret)(?::=|=>|:|=)[ \t]{0,4}(["']?)([^\s"'`<>;,]{6,20})\1(?=$|[\s"'`<>,;)\]}])/gdi;
 
+/**
+ * A line-shaped `NAME=value` assignment whose NAME ends in a secret word (see
+ * `lastWord`): a line of `env`, `set`, `export -p`, `local` or `.env` output.
+ *
+ * The name must start a line, follow Read's `NN<tab>` prefix, or follow the
+ * literal `\n` / `NN\t` of the same dump inside a JSON string, with an optional
+ * `export`-style keyword. `=` only, no whitespace around it. Inside an expression
+ * (`OpenAI(api_key=api_key)`) the same words name a variable, and redacting it
+ * would unread the code, so the generic rule keeps those. The value is bare
+ * (to whitespace, a quote or an escaped `\n`) or quoted, six characters or more,
+ * and is not judged by entropy.
+ */
+const SECRET_ASSIGNMENT_RE =
+  /(?:^|\\n|(?<=\d)(?:\t|\\t))(?:(?:export|declare|typeset|local|set)[ \t]+(?:-[A-Za-z]+[ \t]+)?)?([A-Za-z_][A-Za-z0-9_.-]{0,80})=(?:(["'])([^"'\n]{6,4096}?)\2|((?:[^\s"'`\\]|\\(?![nrt"'])){6,4096}))/gmd;
+
+/** A value that starts like a filesystem path: nothing to revoke, and the task needs it. */
+const LEADING_PATH_RE = /^(?:\/|~|\.{1,2}\/)/;
+
+const SECRET_WORDS = new Set(["token", "key", "secret", "password", "passwd", "auth", "credential", "credentials", "apikey"]);
+
+/**
+ * The secret words the password detector (1c) already owns. A name ending in one
+ * is left to it, so `/redact rule off password-value` stays a complete off switch
+ * for those names instead of a switch another detector quietly overrides.
+ */
+const PASSWORD_VALUE_WORDS = new Set(["secret", "password", "passwd"]);
+
+/**
+ * The last word of a variable name, lowercased.
+ *
+ * Words split on `_ . -` and on a lower-to-upper camel boundary, so `MLX_API_KEY`
+ * and `apiKey` end in `key` while `KEYBOARD_HACK` ends in `hack` and `TOKEN_COUNT`
+ * in `count`: a secret word inside another word, or ahead of the last word, names
+ * something else.
+ */
+function lastWord(name: string): string {
+  return (name.split(/[_.-]|(?<=[a-z0-9])(?=[A-Z])/).pop() ?? "").toLowerCase();
+}
+
 /** Entropy-free detectors whose rule id L3 can switch off; not in the corpus. */
-const ENGINE_RULE_IDS = new Set<string>([PASSWORD_VALUE_RULE_ID]);
+const ENGINE_RULE_IDS = new Set<string>([PASSWORD_VALUE_RULE_ID, SECRET_ASSIGNMENT_RULE_ID]);
+
+/**
+ * True when the text just before a value is an assignment to a secret-named
+ * variable: `api_key": "`, `AUTH_TOKEN=`, `secret: `. The name is read back from
+ * the value's start, so it works for whatever separator style the generic rule
+ * matched, and only its last word counts (see `lastWord`).
+ */
+function followsSecretName(text: string, valueStart: number): boolean {
+  const before = text.slice(Math.max(0, valueStart - 120), valueStart);
+  const m = /([A-Za-z0-9_.-]+)[\s'"`]{0,3}(?::{1,3}=|\|\||=>|\?=|=|:|,)[`'"\s=]{0,5}$/.exec(before);
+  return m?.[1] !== undefined && SECRET_WORDS.has(lastWord(m[1]));
+}
 
 /**
  * True when a candidate is a filesystem path, not a password.
@@ -441,7 +493,8 @@ export function scrub(text: string, opts: ScrubOptions): ScrubResult {
         candidates.push({ label: c.rule.label, start: span.start, end: span.end, value, by: c.rule.id });
         continue;
       }
-      if (isAllowed(value, opts.allowExtra ?? [])) continue;
+      const secretNamed = c.rule.kind === "generic" && followsSecretName(text, span.start);
+      if (isAllowed(value, opts.allowExtra ?? [], { secretNamed })) continue;
       if (GLOBAL_ALLOW.some((re) => re.test(value))) continue;
       if (GLOBAL_STOPWORDS.some((w) => value.toLowerCase() === w)) continue;
       // `minEntropy` is the floor for the generic family, and it has to be able
@@ -456,6 +509,31 @@ export function scrub(text: string, opts: ScrubOptions): ScrubResult {
       if (floor > 0 && shannon(value) < floor) continue;
       if (c.rule.kind === "generic" && contextScore(text, span.start, span.end, value) < threshold) continue;
       candidates.push({ label: c.rule.label, start: span.start, end: span.end, value, by: c.rule.id });
+    }
+  }
+
+  // 2a. secret-named assignments, keyed on the variable name (see
+  // SECRET_ASSIGNMENT_RE). Same trade as 1c: the name replaces the entropy gate,
+  // the allowlist still gates the value, and `strict`/`precision` are untouched.
+  // It runs after the corpus so that, on a span both find, the corpus keeps it
+  // and with it the vendor label (candidates tie-break on insertion order).
+  if (opts.tier === "balanced" && !disabled?.has(SECRET_ASSIGNMENT_RULE_ID)) {
+    SECRET_ASSIGNMENT_RE.lastIndex = 0;
+    for (;;) {
+      const m = SECRET_ASSIGNMENT_RE.exec(text);
+      if (!m) break;
+      if (Date.now() - started > budget) throw new Error("prompt-redact: scan budget exceeded");
+      const name = m[1];
+      const span = m.indices?.[3] ?? m.indices?.[4];
+      if (!name || !span) continue;
+      const word = lastWord(name);
+      if (!SECRET_WORDS.has(word) || PASSWORD_VALUE_WORDS.has(word)) continue;
+      const value = text.slice(span[0], span[1]);
+      if (LEADING_PATH_RE.test(value)) continue;
+      if (isAllowed(value, opts.allowExtra ?? [], { secretNamed: true })) continue;
+      if (GLOBAL_ALLOW.some((re) => re.test(value))) continue;
+      if (GLOBAL_STOPWORDS.some((w) => value.toLowerCase() === w)) continue;
+      candidates.push({ label: "SECRET_ASSIGNMENT", start: span[0], end: span[1], value, by: SECRET_ASSIGNMENT_RULE_ID });
     }
   }
 
